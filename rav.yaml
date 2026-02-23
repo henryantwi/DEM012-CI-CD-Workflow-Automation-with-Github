@@ -1,0 +1,26 @@
+scripts:
+    # ── Setup ──────────────────────────────────────────────────────────────────
+    fernet-key: uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    install: uv sync
+
+    # ── Platform lifecycle ─────────────────────────────────────────────────────
+    up: docker compose up -d --build
+    down: docker compose down
+    down-v: docker compose down -v
+    ps: docker compose ps
+    logs: docker compose logs -f
+
+    # ── Data pipeline ──────────────────────────────────────────────────────────
+    seed: uv run python data_generator/generate_data.py
+    trigger: >
+        curl -X POST http://localhost:8080/api/v1/dags/clickstream_pipeline/dagRuns
+        -H "Content-Type: application/json"
+        -u admin:admin
+        -d "{\"dag_run_id\": \"manual_run_1\"}"
+    validate: uv run python scripts/validate_data_flow.py
+
+    # ── Quality ────────────────────────────────────────────────────────────────
+    test: uv run pytest tests/ -v
+    lint: uv run ruff check .
+    format: uv run ruff format .
+    pre-commit: uv run pre-commit run --all-files
