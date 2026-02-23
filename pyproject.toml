@@ -4,7 +4,20 @@ version = "0.1.0"
 description = "E-commerce Clickstream Analysis Platform — MinIO → Airflow → PostgreSQL → Metabase"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "boto3>=1.42.54",
+    "faker>=40.4.0",
+    "great-expectations>=0.18,<1.0",
+    "langchain>=1.2.10",
+    "langchain-openai>=1.1.10",
+    "polars>=1.38.1",
+    "psycopg2-binary>=2.9.11",
+    "pydantic>=2.12.5",
+    "pytest>=9.0.2",
+    "requests>=2.32.5",
+    "ruff>=0.15.2",
+    "sqlalchemy>=2.0.46",
+]
 
 [tool.ruff]
 line-length = 100
