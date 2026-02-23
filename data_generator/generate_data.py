@@ -20,9 +20,7 @@ import os
 import random
 from datetime import datetime, timedelta, timezone
 
-import boto3
 import polars as pl
-from botocore.exceptions import ClientError
 from faker import Faker
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -155,7 +153,9 @@ def generate_events(
 
 # ── MinIO helpers ──────────────────────────────────────────────────────────────
 
-def get_minio_client() -> boto3.client:
+def get_minio_client():
+    import boto3  # lazy import — not needed in unit tests
+
     return boto3.client(
         "s3",
         endpoint_url=MINIO_ENDPOINT,
@@ -164,7 +164,9 @@ def get_minio_client() -> boto3.client:
     )
 
 
-def ensure_bucket(client: boto3.client, bucket: str) -> None:
+def ensure_bucket(client, bucket: str) -> None:
+    from botocore.exceptions import ClientError  # lazy import
+
     try:
         client.head_bucket(Bucket=bucket)
     except ClientError:
@@ -172,7 +174,7 @@ def ensure_bucket(client: boto3.client, bucket: str) -> None:
         print(f"[minio] Created bucket: {bucket}")
 
 
-def upload_dataframe(client: boto3.client, df: pl.DataFrame, bucket: str, key: str) -> None:
+def upload_dataframe(client, df: pl.DataFrame, bucket: str, key: str) -> None:
     buffer = io.BytesIO()
     df.write_csv(buffer)
     buffer.seek(0)
