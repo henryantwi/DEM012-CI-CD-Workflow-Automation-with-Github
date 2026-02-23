@@ -1,0 +1,17 @@
+[project]
+name = "clickstream-platform"
+version = "0.1.0"
+description = "E-commerce Clickstream Analysis Platform — MinIO → Airflow → PostgreSQL → Metabase"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
