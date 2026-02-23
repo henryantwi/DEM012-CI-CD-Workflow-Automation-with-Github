@@ -1,0 +1,222 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CI/CD Pipeline — DEM012 Mini Data Platform
+#
+# Jobs:
+#   ci  — lint + unit tests + Docker image build  (all branches / PRs)
+#   cd  — full E2E deploy → seed → DAG run → validate → teardown
+#         (main branch only, after ci passes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  # Used by docker-compose and the validate script.
+  # Non-secret values are set here; secrets come from repository settings.
+  POSTGRES_USER: airflow
+  POSTGRES_PASSWORD: airflow
+  POSTGRES_DB: airflow
+  POSTGRES_HOST: localhost
+  POSTGRES_PORT: "5432"
+  MINIO_ROOT_USER: minioadmin
+  MINIO_ROOT_PASSWORD: minioadmin
+  MINIO_ENDPOINT: http://localhost:9000
+  MINIO_BUCKET: clickstream-data
+  METABASE_URL: http://localhost:3000
+  # Airflow
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@localhost:5432/airflow
+  AIRFLOW__CORE__FERNET_KEY: ${{ secrets.AIRFLOW_FERNET_KEY }}
+  AIRFLOW__WEBSERVER__SECRET_KEY: ${{ secrets.AIRFLOW_SECRET_KEY }}
+  AIRFLOW_UID: "50000"
+  # Metabase
+  MB_DB_TYPE: postgres
+  MB_DB_DBNAME: metabase
+  MB_DB_PORT: "5432"
+  MB_DB_USER: airflow
+  MB_DB_PASS: airflow
+  MB_DB_HOST: postgres
+
+# ─── CI job ──────────────────────────────────────────────────────────────────
+jobs:
+  ci:
+    name: Lint · Test · Build image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync --locked
+
+      - name: Build custom Airflow Docker image
+        run: docker build -f docker/airflow/Dockerfile .
+
+      - name: Lint with ruff
+        run: uv run ruff check .
+
+      - name: Run unit tests
+        run: uv run pytest tests/ -v
+
+# ─── CD job ──────────────────────────────────────────────────────────────────
+  cd:
+    name: Deploy · E2E Validate
+    runs-on: ubuntu-latest
+    needs: ci
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync --locked
+
+      # ── Write .env so docker-compose can read it ────────────────────────────
+      - name: Write .env file
+        run: |
+          cat <<'EOF' > .env
+          POSTGRES_USER=airflow
+          POSTGRES_PASSWORD=airflow
+          POSTGRES_DB=airflow
+          POSTGRES_HOST=postgres
+          POSTGRES_PORT=5432
+          MINIO_ROOT_USER=minioadmin
+          MINIO_ROOT_PASSWORD=minioadmin
+          MINIO_ENDPOINT=http://minio:9000
+          MINIO_BUCKET=clickstream-data
+          AIRFLOW__CORE__EXECUTOR=LocalExecutor
+          AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+          AIRFLOW__CORE__FERNET_KEY=${{ secrets.AIRFLOW_FERNET_KEY }}
+          AIRFLOW__WEBSERVER__SECRET_KEY=${{ secrets.AIRFLOW_SECRET_KEY }}
+          AIRFLOW_UID=50000
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          MB_DB_TYPE=postgres
+          MB_DB_DBNAME=metabase
+          MB_DB_PORT=5432
+          MB_DB_USER=airflow
+          MB_DB_PASS=airflow
+          MB_DB_HOST=postgres
+          EOF
+
+      # ── Start the platform ─────────────────────────────────────────────────
+      - name: Start platform with Docker Compose
+        run: docker compose up -d --build
+
+      - name: Wait for all services to become healthy
+        run: |
+          echo "Waiting for services..."
+          timeout 300 bash -c '
+            while true; do
+              unhealthy=$(docker compose ps --format json \
+                | python3 -c "
+          import sys, json
+          items = [json.loads(l) for l in sys.stdin if l.strip()]
+          bad = [i[\"Name\"] for i in items
+                 if i.get(\"Health\") not in (\"healthy\", \"\", None)
+                    and i.get(\"State\") == \"running\"
+                    and i.get(\"Health\") == \"starting\"]
+          print(len(bad))
+          " 2>/dev/null || echo "0")
+              not_running=$(docker compose ps --format json \
+                | python3 -c "
+          import sys, json
+          items = [json.loads(l) for l in sys.stdin if l.strip()]
+          bad = [i[\"Name\"] for i in items
+                 if i.get(\"State\") != \"running\"
+                    and i.get(\"Service\") != \"airflow-init\"]
+          print(\" \".join(bad))
+          " 2>/dev/null || echo "")
+              if [ -z "$not_running" ] || [ "$not_running" = " " ]; then
+                echo "All services are running."
+                break
+              fi
+              echo "Still waiting for: $not_running"
+              sleep 10
+            done
+          '
+
+      - name: Show service status
+        run: docker compose ps
+
+      # ── Seed data ─────────────────────────────────────────────────────────
+      - name: Generate and upload sample data to MinIO
+        env:
+          MINIO_ENDPOINT: http://localhost:9000
+        run: uv run python data_generator/generate_data.py
+
+      # ── Trigger the Airflow DAG ────────────────────────────────────────────
+      - name: Trigger clickstream_pipeline DAG
+        run: |
+          DAG_RUN_ID="ci_cd_run_${{ github.run_id }}"
+          echo "DAG_RUN_ID=$DAG_RUN_ID" >> $GITHUB_ENV
+
+          curl -sf -X POST \
+            "http://localhost:8080/api/v1/dags/clickstream_pipeline/dagRuns" \
+            -H "Content-Type: application/json" \
+            -u admin:admin \
+            -d "{\"dag_run_id\": \"$DAG_RUN_ID\"}"
+
+      # ── Poll until DAG succeeds (or timeout) ──────────────────────────────
+      - name: Wait for DAG run to complete
+        run: |
+          DAG_RUN_ID="${{ env.DAG_RUN_ID }}"
+          MAX_WAIT=600   # 10 minutes
+          ELAPSED=0
+          INTERVAL=15
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            STATE=$(curl -sf \
+              "http://localhost:8080/api/v1/dags/clickstream_pipeline/dagRuns/$DAG_RUN_ID" \
+              -u admin:admin \
+              | python3 -c "import sys, json; print(json.load(sys.stdin).get('state','unknown'))")
+
+            echo "DAG state: $STATE  (${ELAPSED}s elapsed)"
+
+            case "$STATE" in
+              success)
+                echo "DAG run succeeded."
+                exit 0
+                ;;
+              failed)
+                echo "DAG run FAILED."
+                exit 1
+                ;;
+              *)
+                sleep $INTERVAL
+                ELAPSED=$((ELAPSED + INTERVAL))
+                ;;
+            esac
+          done
+
+          echo "Timed out waiting for DAG run."
+          exit 1
+
+      # ── E2E validation ────────────────────────────────────────────────────
+      - name: Run E2E data flow validation
+        env:
+          MINIO_ENDPOINT: http://localhost:9000
+          POSTGRES_HOST: localhost
+          METABASE_URL: http://localhost:3000
+        run: uv run python scripts/validate_data_flow.py
+
+      # ── Tear down ─────────────────────────────────────────────────────────
+      - name: Tear down Docker Compose
+        if: always()
+        run: docker compose down -v
