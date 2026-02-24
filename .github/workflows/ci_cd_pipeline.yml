@@ -31,8 +31,6 @@ env:
   # Airflow
   AIRFLOW__CORE__EXECUTOR: LocalExecutor
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@localhost:5432/airflow
-  AIRFLOW__CORE__FERNET_KEY: ${{ secrets.AIRFLOW_FERNET_KEY }}
-  AIRFLOW__WEBSERVER__SECRET_KEY: ${{ secrets.AIRFLOW_SECRET_KEY }}
   AIRFLOW_UID: "50000"
   # Metabase
   MB_DB_TYPE: postgres
@@ -88,10 +86,25 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --locked
 
+      # ── Generate Airflow keys if repo secrets are not set ───────────────────
+      - name: Generate Airflow secrets
+        id: airflow_secrets
+        run: |
+          if [ -n "${{ secrets.AIRFLOW_FERNET_KEY }}" ]; then
+            echo "fernet_key=${{ secrets.AIRFLOW_FERNET_KEY }}" >> $GITHUB_OUTPUT
+          else
+            echo "fernet_key=$(python3 -c 'import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')" >> $GITHUB_OUTPUT
+          fi
+          if [ -n "${{ secrets.AIRFLOW_SECRET_KEY }}" ]; then
+            echo "secret_key=${{ secrets.AIRFLOW_SECRET_KEY }}" >> $GITHUB_OUTPUT
+          else
+            echo "secret_key=$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> $GITHUB_OUTPUT
+          fi
+
       # ── Write .env so docker-compose can read it ────────────────────────────
       - name: Write .env file
         run: |
-          cat <<'EOF' > .env
+          cat <<EOF > .env
           POSTGRES_USER=airflow
           POSTGRES_PASSWORD=airflow
           POSTGRES_DB=airflow
@@ -103,8 +116,8 @@ jobs:
           MINIO_BUCKET=clickstream-data
           AIRFLOW__CORE__EXECUTOR=LocalExecutor
           AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-          AIRFLOW__CORE__FERNET_KEY=${{ secrets.AIRFLOW_FERNET_KEY }}
-          AIRFLOW__WEBSERVER__SECRET_KEY=${{ secrets.AIRFLOW_SECRET_KEY }}
+          AIRFLOW__CORE__FERNET_KEY=${{ steps.airflow_secrets.outputs.fernet_key }}
+          AIRFLOW__WEBSERVER__SECRET_KEY=${{ steps.airflow_secrets.outputs.secret_key }}
           AIRFLOW_UID=50000
           GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
           MB_DB_TYPE=postgres
