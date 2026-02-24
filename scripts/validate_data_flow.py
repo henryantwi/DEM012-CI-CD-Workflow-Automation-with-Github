@@ -60,13 +60,13 @@ def check_minio() -> bool:
         )
         for key in EXPECTED_KEYS:
             client.head_object(Bucket=MINIO_BUCKET, Key=key)
-            print(f"  ✓  s3://{MINIO_BUCKET}/{key} exists")
+            print(f"  [OK]  s3://{MINIO_BUCKET}/{key} exists")
         return True
     except ClientError as exc:
-        print(f"  ✗  MinIO check failed: {exc}")
+        print(f"  [FAIL]  MinIO check failed: {exc}")
         return False
     except Exception as exc:  # noqa: BLE001
-        print(f"  ✗  MinIO connection error: {exc}")
+        print(f"  [FAIL]  MinIO connection error: {exc}")
         return False
 
 
@@ -82,13 +82,13 @@ def check_postgres() -> bool:
                 text("SELECT COUNT(*) FROM fact_funnel_metrics")
             ).scalar()
         if row_count and row_count > 0:
-            print(f"  ✓  fact_funnel_metrics has {row_count} rows")
+            print(f"  [OK]  fact_funnel_metrics has {row_count} rows")
             return True
         else:
-            print("  ✗  fact_funnel_metrics is empty")
+            print("  [FAIL]  fact_funnel_metrics is empty")
             return False
     except Exception as exc:  # noqa: BLE001
-        print(f"  ✗  PostgreSQL check failed: {exc}")
+        print(f"  [FAIL]  PostgreSQL check failed: {exc}")
         return False
 
 
@@ -103,18 +103,21 @@ def check_metabase(max_retries: int = 5, delay: int = 10) -> bool:
         try:
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200 and resp.json().get("status") == "ok":
-                print(f"  ✓  Metabase healthy at {url}")
+                print(f"  [OK]  Metabase healthy at {url}")
                 return True
             else:
-                print(f"  ⚠  Attempt {attempt}: status={resp.status_code} body={resp.text[:80]}")
+                print(
+                    f"  [WARN]  Attempt {attempt}: status={resp.status_code} "
+                    f"body={resp.text[:80]}"
+                )
         except requests.RequestException as exc:
-            print(f"  ⚠  Attempt {attempt}: connection error — {exc}")
+            print(f"  [WARN]  Attempt {attempt}: connection error - {exc}")
 
         if attempt < max_retries:
             print(f"     Retrying in {delay}s...")
             time.sleep(delay)
 
-    print(f"  ✗  Metabase not healthy after {max_retries} attempts")
+    print(f"  [FAIL]  Metabase not healthy after {max_retries} attempts")
     return False
 
 
@@ -122,7 +125,7 @@ def check_metabase(max_retries: int = 5, delay: int = 10) -> bool:
 
 def main() -> None:
     print("=" * 55)
-    print("  Clickstream Platform — End-to-End Validation")
+    print("  Clickstream Platform - End-to-End Validation")
     print("=" * 55)
 
     results = {
@@ -136,7 +139,7 @@ def main() -> None:
     print("=" * 55)
     all_passed = True
     for name, passed in results.items():
-        status = "PASS ✓" if passed else "FAIL ✗"
+        status = "PASS [OK]" if passed else "FAIL [X]"
         print(f"  {name:<20} {status}")
         if not passed:
             all_passed = False
@@ -146,7 +149,7 @@ def main() -> None:
         print("  All data flow checks passed!")
         sys.exit(0)
     else:
-        print("  One or more checks FAILED — see output above.")
+        print("  One or more checks FAILED - see output above.")
         sys.exit(1)
 
 

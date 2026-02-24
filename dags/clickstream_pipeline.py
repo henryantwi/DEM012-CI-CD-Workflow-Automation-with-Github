@@ -10,7 +10,6 @@ Data flow:  MinIO (raw CSV) → Airflow (Polars + LangChain) → PostgreSQL
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import tempfile
@@ -68,6 +67,41 @@ class ProductCategory(BaseModel):
     )
 
 
+def run_ge_suite(df: pl.DataFrame, suite_path: str, task_name: str) -> None:
+    """Run a Great Expectations suite against an in-memory dataframe."""
+    import great_expectations as gx
+
+    with open(suite_path, encoding="utf-8") as f:
+        suite_def = json.load(f)
+
+    dataset = gx.from_pandas(df.to_pandas())
+    failed_expectations: list[str] = []
+
+    for expectation in suite_def.get("expectations", []):
+        expectation_type = expectation["expectation_type"]
+        kwargs = expectation.get("kwargs", {})
+        expectation_fn = getattr(dataset, expectation_type, None)
+
+        if expectation_fn is None:
+            raise AttributeError(f"[{task_name}] Unsupported expectation: {expectation_type}")
+
+        result = expectation_fn(**kwargs)
+        success = (
+            result.get("success", False)
+            if isinstance(result, dict)
+            else bool(getattr(result, "success", False))
+        )
+
+        if not success:
+            failed_expectations.append(f"{expectation_type}({kwargs})")
+
+    if failed_expectations:
+        raise ValueError(
+            f"[{task_name}] {len(failed_expectations)} expectation(s) failed: "
+            + "; ".join(failed_expectations)
+        )
+
+
 # ── DAG definition ─────────────────────────────────────────────────────────────
 @dag(
     dag_id="clickstream_pipeline",
@@ -108,38 +142,10 @@ def clickstream_pipeline():
     @task()
     def validate_raw(paths: dict[str, str]) -> dict[str, str]:
         """Run Great Expectations validation on the raw events CSV."""
-        import great_expectations as gx
-
         events_df = pl.read_csv(paths["events"])
         suite_path = os.path.join(GE_SUITES_DIR, "raw_events_suite.json")
 
-        with open(suite_path) as f:
-            suite_def = json.load(f)
-
-        context = gx.get_context(mode="ephemeral")
-        suite = context.suites.add(
-            gx.ExpectationSuite(expectation_suite_name="raw_events_suite")
-        )
-
-        for exp in suite_def["expectations"]:
-            suite.add_expectation(
-                gx.core.ExpectationConfiguration(
-                    expectation_type=exp["expectation_type"],
-                    kwargs=exp["kwargs"],
-                )
-            )
-
-        # Run against in-memory Polars DataFrame (convert to pandas for GE)
-        validator = context.sources.add_pandas(name="events_source").add_dataframe_asset(
-            name="events_df"
-        ).add_batch_definition_whole_dataframe("events_batch").get_batch(
-            batch_parameters={"dataframe": events_df.to_pandas()}
-        )
-
-        results = validator.validate(suite)
-        if not results.success:
-            failed = [r for r in results.results if not r.success]
-            raise ValueError(f"[validate_raw] {len(failed)} expectation(s) failed: {failed}")
+        run_ge_suite(events_df, suite_path, task_name="validate_raw")
 
         print(f"[validate_raw] All expectations passed for events ({len(events_df)} rows)")
         return paths
@@ -153,7 +159,7 @@ def clickstream_pipeline():
         2. Compute per-product funnel metrics (view → cart → purchase rates)
         """
         events = pl.read_csv(paths["events"]).with_columns(
-            pl.col("timestamp").str.to_datetime(strict=False)
+            pl.col("timestamp").str.to_datetime(time_zone="UTC", strict=False)
         )
         products = pl.read_csv(paths["products"])
 
@@ -202,7 +208,11 @@ def clickstream_pipeline():
                 .otherwise(0.0)
                 .alias("cart_to_purchase_rate"),
             )
-            .join(products.select(["product_id", "name", "description"]), on="product_id", how="left")
+            .join(
+                products.select(["product_id", "name", "description"]),
+                on="product_id",
+                how="left",
+            )
         )
 
         # Serialize to JSON for XCom (Polars → dict)
@@ -273,39 +283,10 @@ def clickstream_pipeline():
     @task()
     def validate_enriched(data: dict) -> dict:
         """Run Great Expectations validation on the enriched funnel metrics."""
-        import great_expectations as gx
-
         funnel_df = pl.DataFrame(data["funnel"])
         suite_path = os.path.join(GE_SUITES_DIR, "enriched_funnel_suite.json")
 
-        with open(suite_path) as f:
-            suite_def = json.load(f)
-
-        context = gx.get_context(mode="ephemeral")
-        suite = context.suites.add(
-            gx.ExpectationSuite(expectation_suite_name="enriched_funnel_suite")
-        )
-
-        for exp in suite_def["expectations"]:
-            suite.add_expectation(
-                gx.core.ExpectationConfiguration(
-                    expectation_type=exp["expectation_type"],
-                    kwargs=exp["kwargs"],
-                )
-            )
-
-        validator = context.sources.add_pandas(name="funnel_source").add_dataframe_asset(
-            name="funnel_df"
-        ).add_batch_definition_whole_dataframe("funnel_batch").get_batch(
-            batch_parameters={"dataframe": funnel_df.to_pandas()}
-        )
-
-        results = validator.validate(suite)
-        if not results.success:
-            failed = [r for r in results.results if not r.success]
-            raise ValueError(
-                f"[validate_enriched] {len(failed)} expectation(s) failed: {failed}"
-            )
+        run_ge_suite(funnel_df, suite_path, task_name="validate_enriched")
 
         print(f"[validate_enriched] All expectations passed ({len(funnel_df)} rows)")
         return data

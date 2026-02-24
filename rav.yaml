@@ -12,11 +12,7 @@ scripts:
 
     # ── Data pipeline ──────────────────────────────────────────────────────────
     seed: uv run python data_generator/generate_data.py
-    trigger: >
-        curl -X POST http://localhost:8080/api/v1/dags/clickstream_pipeline/dagRuns
-        -H "Content-Type: application/json"
-        -u admin:admin
-        -d "{\"dag_run_id\": \"manual_run_1\"}"
+    trigger: python scripts/trigger_dag.py
     validate: uv run python scripts/validate_data_flow.py
 
     # ── Quality ────────────────────────────────────────────────────────────────
