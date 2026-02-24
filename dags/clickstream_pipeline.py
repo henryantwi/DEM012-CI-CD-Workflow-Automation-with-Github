@@ -40,7 +40,7 @@ PG_CONN = (
     f"{os.environ['POSTGRES_PORT']}/{os.environ['POSTGRES_DB']}"
 )
 
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 GE_SUITES_DIR = "/opt/airflow/great_expectations/expectations"
 
@@ -229,16 +229,17 @@ def clickstream_pipeline():
     @task()
     def enrich_ai(data: dict) -> dict:
         """
-        Use LangChain Structured Output (ChatOpenAI.with_structured_output) to
+        Use LangChain Structured Output (init_chat_model.with_structured_output) to
         categorise unique products by name + description.
-        Model: gpt-4o-mini — very low cost (~$0.15/1M input tokens).
+        Model: groq:llama-3.3-70b-versatile.
         """
-        from langchain_openai import ChatOpenAI
+        from langchain.chat_models import init_chat_model
 
-        llm = ChatOpenAI(
-            model="gpt-4o-mini",
+        llm = init_chat_model(
+            "groq:llama-3.3-70b-versatile",
             temperature=0,
-            api_key=OPENAI_API_KEY,
+            api_key=GROQ_API_KEY,
+            streaming=False,
         ).with_structured_output(ProductCategory)
 
         products: list[dict] = data["products"]

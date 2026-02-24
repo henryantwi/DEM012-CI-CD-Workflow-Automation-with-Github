@@ -26,6 +26,6 @@ RUN uv pip install --system \
     sqlalchemy \
     psycopg2-binary \
     langchain \
-    langchain-openai \
+    langchain-groq \
     faker \
     pydantic

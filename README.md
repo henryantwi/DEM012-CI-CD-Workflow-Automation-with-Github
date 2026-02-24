@@ -24,7 +24,7 @@ graph LR
             E["1 · extract"]
             VR["2 · validate_raw\nGreat Expectations"]
             T["3 · transform\nPolars sessionisation\n+ funnel metrics"]
-            AI["4 · enrich_ai\nChatOpenAI gpt-4o-mini\nStructured Output"]
+            AI["4 · enrich_ai\ninit_chat_model groq:llama-3.3-70b-versatile\nStructured Output"]
             VE["5 · validate_enriched\nGreat Expectations"]
             L["6 · load\nSQLAlchemy upsert"]
         end
@@ -52,7 +52,7 @@ graph LR
 | 1 | `extract` | Download `users.csv`, `products.csv`, `events.csv` from MinIO to a temp dir |
 | 2 | `validate_raw` | GE suite: non-null `user_id`/`product_id`/`event_type`, valid event-type enum |
 | 3 | `transform` | Polars: 30-min session windows, per-product funnel counts & conversion rates |
-| 4 | `enrich_ai` | `ChatOpenAI(gpt-4o-mini).with_structured_output(ProductCategory)` — assigns one of 8 categories |
+| 4 | `enrich_ai` | `init_chat_model("groq:llama-3.3-70b-versatile", streaming=False).with_structured_output(ProductCategory)` — assigns one of 8 categories |
 | 5 | `validate_enriched` | GE suite: category not-null, conversion rates in [0, 1] |
 | 6 | `load` | SQLAlchemy upserts into `dim_products` and `fact_funnel_metrics` |
 
@@ -66,7 +66,7 @@ graph LR
 | Package manager | [uv](https://docs.astral.sh/uv/) |
 | Data processing | [Polars](https://pola.rs/) |
 | Data validation | [Great Expectations](https://greatexpectations.io/) ≥ 0.18 |
-| AI enrichment | [LangChain](https://python.langchain.com/) + `gpt-4o-mini` |
+| AI enrichment | [LangChain](https://python.langchain.com/) + Groq `llama-3.3-70b-versatile` |
 | Orchestration | Apache Airflow 2.9 (TaskFlow API) |
 | Object storage | MinIO |
 | Database | PostgreSQL 15 |
@@ -80,7 +80,7 @@ graph LR
 
 - Docker ≥ 24 with Docker Compose V2
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) ≥ 0.5
-- An OpenAI API key (for the AI enrichment task)
+- A Groq API key (for the AI enrichment task)
 
 ---
 
@@ -94,7 +94,7 @@ cd DEM012-CI-CD-Workflow-Automation-with-Github
 
 cp .env.example .env
 # Then open .env and fill in:
-#   OPENAI_API_KEY=sk-...
+#   GROQ_API_KEY=gsk-...
 #   AIRFLOW__CORE__FERNET_KEY=<run: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
 #   AIRFLOW__WEBSERVER__SECRET_KEY=<random string>
 ```
@@ -224,7 +224,7 @@ uv run pre-commit install   # one-time setup
 | Validate | `uv run python scripts/validate_data_flow.py` |
 | Tear down | `docker compose down -v` |
 
-> The `OPENAI_API_KEY` is injected via a GitHub Actions **repository secret**.
+> The `GROQ_API_KEY` is injected via a GitHub Actions **repository secret**.
 
 ---
 
@@ -266,7 +266,7 @@ See [.env.example](.env.example) for the full list. Key variables:
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Required for the AI enrichment task |
+| `GROQ_API_KEY` | Required for the AI enrichment task |
 | `POSTGRES_USER/PASSWORD/DB` | PostgreSQL credentials |
 | `MINIO_ROOT_USER/ROOT_PASSWORD` | MinIO access credentials |
 | `AIRFLOW__CORE__FERNET_KEY` | Airflow encryption key (generate once) |
