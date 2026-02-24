@@ -52,7 +52,7 @@ graph LR
 | 1 | `extract` | Download `users.csv`, `products.csv`, `events.csv` from MinIO to a temp dir |
 | 2 | `validate_raw` | GE suite: non-null `user_id`/`product_id`/`event_type`, valid event-type enum |
 | 3 | `transform` | Polars: 30-min session windows, per-product funnel counts & conversion rates |
-| 4 | `enrich_ai` | `init_chat_model("groq:llama-3.3-70b-versatile", streaming=False).with_structured_output(ProductCategory)` — assigns one of 8 categories |
+| 4 | `enrich_ai` | `init_chat_model("groq:llama-3.3-70b-versatile", streaming=False).with_structured_output(ProductCategory)` with request pacing + exponential backoff on 429s |
 | 5 | `validate_enriched` | GE suite: category not-null, conversion rates in [0, 1] |
 | 6 | `load` | SQLAlchemy upserts into `dim_products` and `fact_funnel_metrics` |
 
@@ -97,6 +97,11 @@ cp .env.example .env
 #   GROQ_API_KEY=gsk-...
 #   AIRFLOW__CORE__FERNET_KEY=<run: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
 #   AIRFLOW__WEBSERVER__SECRET_KEY=<random string>
+#   # Optional Groq rate-limit tuning:
+#   GROQ_REQUESTS_PER_SECOND=1.5
+#   GROQ_MAX_ATTEMPTS=8
+#   GROQ_RETRY_BASE_SECONDS=2
+#   GROQ_RETRY_MAX_SECONDS=30
 ```
 
 ### 2 — Install Python dependencies (local dev / testing)
@@ -155,6 +160,20 @@ Poll the run until it succeeds:
 curl http://localhost:8080/api/v1/dags/clickstream_pipeline/dagRuns/manual__local_run \
   -u admin:admin | python -m json.tool | grep state
 ```
+
+### Groq Rate-Limit Tuning (Optional)
+
+The `enrich_ai` task now includes:
+- Request pacing between calls
+- Exponential backoff + jitter when Groq returns `429 Too Many Requests`
+
+Defaults (if unset) are tuned in code:
+- `GROQ_REQUESTS_PER_SECOND=1.5`
+- `GROQ_MAX_ATTEMPTS=8`
+- `GROQ_RETRY_BASE_SECONDS=2`
+- `GROQ_RETRY_MAX_SECONDS=30`
+
+If your account/model quota is tighter, lower `GROQ_REQUESTS_PER_SECOND` (for example `1.0` or `0.8`) in `.env`.
 
 ### 6 — Explore results in Metabase
 
@@ -267,6 +286,10 @@ See [.env.example](.env.example) for the full list. Key variables:
 | Variable | Description |
 |----------|-------------|
 | `GROQ_API_KEY` | Required for the AI enrichment task |
+| `GROQ_REQUESTS_PER_SECOND` | Optional max request pace for AI enrichment (default: `1.5`) |
+| `GROQ_MAX_ATTEMPTS` | Optional max attempts per product classification on rate-limit errors (default: `8`) |
+| `GROQ_RETRY_BASE_SECONDS` | Optional initial backoff for 429 retries (default: `2`) |
+| `GROQ_RETRY_MAX_SECONDS` | Optional cap for exponential backoff delay (default: `30`) |
 | `POSTGRES_USER/PASSWORD/DB` | PostgreSQL credentials |
 | `MINIO_ROOT_USER/ROOT_PASSWORD` | MinIO access credentials |
 | `AIRFLOW__CORE__FERNET_KEY` | Airflow encryption key (generate once) |

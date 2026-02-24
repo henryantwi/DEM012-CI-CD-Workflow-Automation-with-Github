@@ -42,7 +42,7 @@ PG_CONN = (
     f"{os.environ['POSTGRES_PORT']}/{os.environ['POSTGRES_DB']}"
 )
 
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 GE_SUITES_DIR = "/opt/airflow/great_expectations/expectations"
 
@@ -237,6 +237,31 @@ def clickstream_pipeline():
         """
         from langchain.chat_models import init_chat_model
 
+        products: list[dict] = data["products"]
+        fail_open = os.getenv("AI_ENRICHMENT_FAIL_OPEN", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        fallback_category = os.getenv("AI_ENRICHMENT_FALLBACK_CATEGORY", "Other")
+        requests_per_second = float(os.getenv("GROQ_REQUESTS_PER_SECOND", "0.8"))
+        max_attempts = int(os.getenv("GROQ_MAX_ATTEMPTS", "8"))
+        retry_base_seconds = float(os.getenv("GROQ_RETRY_BASE_SECONDS", "2.0"))
+        retry_max_seconds = float(os.getenv("GROQ_RETRY_MAX_SECONDS", "30.0"))
+        min_request_interval = 1.0 / max(requests_per_second, 0.1)
+        last_request_at = 0.0
+
+        if not GROQ_API_KEY:
+            if fail_open:
+                print("[enrich_ai] GROQ_API_KEY is not set; using fallback categories")
+                for row in data["funnel"]:
+                    row["category"] = fallback_category
+                for row in products:
+                    row["category"] = fallback_category
+                return {"funnel": data["funnel"], "products": products}
+            raise ValueError("GROQ_API_KEY is not set and AI_ENRICHMENT_FAIL_OPEN=false")
+
         llm = init_chat_model(
             "groq:llama-3.3-70b-versatile",
             temperature=0,
@@ -244,14 +269,6 @@ def clickstream_pipeline():
             max_retries=0,
             streaming=False,
         ).with_structured_output(ProductCategory)
-
-        products: list[dict] = data["products"]
-        requests_per_second = float(os.getenv("GROQ_REQUESTS_PER_SECOND", "1.5"))
-        max_attempts = int(os.getenv("GROQ_MAX_ATTEMPTS", "8"))
-        retry_base_seconds = float(os.getenv("GROQ_RETRY_BASE_SECONDS", "2.0"))
-        retry_max_seconds = float(os.getenv("GROQ_RETRY_MAX_SECONDS", "30.0"))
-        min_request_interval = 1.0 / max(requests_per_second, 0.1)
-        last_request_at = 0.0
 
         def invoke_with_retries(prompt: str) -> ProductCategory:
             nonlocal last_request_at
@@ -290,8 +307,9 @@ def clickstream_pipeline():
             raise RuntimeError("[enrich_ai] Unreachable retry guard")
 
         # Deduplicate products to minimise API calls
-        seen: dict[str, ProductCategory] = {}
+        seen: dict[str, str] = {}
         categorised: dict[str, str] = {}
+        fallback_count = 0
 
         for product in products:
             pid = product["product_id"]
@@ -299,7 +317,7 @@ def clickstream_pipeline():
             desc = product.get("description", "")
 
             if name in seen:
-                categorised[pid] = seen[name].category
+                categorised[pid] = seen[name]
                 continue
 
             prompt = (
@@ -308,21 +326,38 @@ def clickstream_pipeline():
                 "Classify this product into the most fitting category."
             )
 
-            result = invoke_with_retries(prompt)
-            seen[name] = result
-            categorised[pid] = result.category
-            print(f"[enrich_ai] {name!r} → {result.category} (confidence: {result.confidence:.2f})")
+            try:
+                result = invoke_with_retries(prompt)
+                seen[name] = result.category
+                categorised[pid] = result.category
+                print(
+                    f"[enrich_ai] {name!r} -> {result.category} "
+                    f"(confidence: {result.confidence:.2f})"
+                )
+            except Exception as exc:
+                if not fail_open:
+                    raise
+                fallback_count += 1
+                seen[name] = fallback_category
+                categorised[pid] = fallback_category
+                print(
+                    f"[enrich_ai] WARN fallback for {name!r}: {exc!s}. "
+                    f"Using category={fallback_category!r}"
+                )
 
         # Merge category back into funnel records
         funnel_records: list[dict] = data["funnel"]
         for row in funnel_records:
-            row["category"] = categorised.get(row["product_id"], "Other")
+            row["category"] = categorised.get(row["product_id"], fallback_category)
 
         # Also merge into products records
         for row in products:
-            row["category"] = categorised.get(row["product_id"], "Other")
+            row["category"] = categorised.get(row["product_id"], fallback_category)
 
-        print(f"[enrich_ai] Enriched {len(seen)} unique product prompts")
+        print(
+            f"[enrich_ai] Enriched {len(seen)} unique product prompts; "
+            f"fallbacks={fallback_count}"
+        )
         return {"funnel": funnel_records, "products": products}
 
     # ── Task 5: Validate enriched data ────────────────────────────────────────

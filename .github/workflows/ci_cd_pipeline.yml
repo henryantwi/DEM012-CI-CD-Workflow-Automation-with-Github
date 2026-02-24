@@ -120,6 +120,9 @@ jobs:
           AIRFLOW__WEBSERVER__SECRET_KEY=${{ steps.airflow_secrets.outputs.secret_key }}
           AIRFLOW_UID=50000
           GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          GROQ_REQUESTS_PER_SECOND=0.8
+          AI_ENRICHMENT_FAIL_OPEN=true
+          AI_ENRICHMENT_FALLBACK_CATEGORY=Other
           MB_DB_TYPE=postgres
           MB_DB_DBNAME=metabase
           MB_DB_PORT=5432
@@ -191,6 +194,9 @@ jobs:
       - name: Generate and upload sample data to MinIO
         env:
           MINIO_ENDPOINT: http://localhost:9000
+          NUM_USERS: "120"
+          NUM_PRODUCTS: "20"
+          NUM_EVENTS: "800"
         run: uv run python data_generator/generate_data.py
 
       # ── Trigger the Airflow DAG ────────────────────────────────────────────
@@ -225,6 +231,7 @@ jobs:
       # ── Poll until DAG succeeds (or timeout) ──────────────────────────────
       - name: Wait for DAG run to complete
         run: |
+          set -euo pipefail
           DAG_RUN_ID="${{ steps.trigger_dag.outputs.dag_run_id }}"
           MAX_WAIT=600   # 10 minutes
           ELAPSED=0
@@ -246,6 +253,12 @@ jobs:
                 ;;
               failed)
                 echo "DAG run FAILED."
+                echo "Failed task instances:"
+                curl --fail --silent --show-error \
+                  --retry 6 --retry-all-errors --retry-delay 3 --max-time 20 \
+                  "http://localhost:8080/api/v1/dags/clickstream_pipeline/dagRuns/$DAG_RUN_ID/taskInstances?limit=200" \
+                  -u admin:admin \
+                  | python3 -c "import json,sys; items=json.load(sys.stdin).get('task_instances', []); failed=[t for t in items if t.get('state') in ('failed','upstream_failed')]; print('\n'.join('  - {}: state={} try={}'.format(t.get('task_id'), t.get('state'), t.get('try_number')) for t in failed) if failed else '  (none reported)')"
                 exit 1
                 ;;
               *)
@@ -257,6 +270,12 @@ jobs:
 
           echo "Timed out waiting for DAG run."
           exit 1
+
+      - name: Show Airflow logs on DAG failure
+        if: failure()
+        run: |
+          docker compose logs --no-color --tail=200 airflow-scheduler
+          docker compose logs --no-color --tail=200 airflow-webserver
 
       # ── E2E validation ────────────────────────────────────────────────────
       - name: Run E2E data flow validation

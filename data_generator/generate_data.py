@@ -29,9 +29,24 @@ MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "minioadmin")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "clickstream-data")
 
-NUM_USERS = 200
-NUM_PRODUCTS = 50
-NUM_EVENTS = 2000
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError
+        return parsed
+    except ValueError:
+        print(f"[warn] Invalid {name}={value!r}; using default {default}")
+        return default
+
+
+NUM_USERS = _env_int("NUM_USERS", 200)
+NUM_PRODUCTS = _env_int("NUM_PRODUCTS", 50)
+NUM_EVENTS = _env_int("NUM_EVENTS", 2000)
 
 PRODUCT_ADJECTIVES = [
     "Wireless", "Portable", "Smart", "Ergonomic", "Ultra", "Pro", "Compact",
