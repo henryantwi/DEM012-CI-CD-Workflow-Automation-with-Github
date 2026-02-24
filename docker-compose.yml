@@ -23,7 +23,7 @@ x-airflow-common: &airflow-common
     POSTGRES_DB: ${POSTGRES_DB}
   volumes:
     - ./dags:/opt/airflow/dags
-    - ./logs:/opt/airflow/logs
+    - airflow_logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
     - ./great_expectations:/opt/airflow/great_expectations
   depends_on:
@@ -136,3 +136,4 @@ services:
 volumes:
   pgdata:
   minio_data:
+  airflow_logs:
