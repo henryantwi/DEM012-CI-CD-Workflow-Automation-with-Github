@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import tempfile
+import time
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -239,10 +241,53 @@ def clickstream_pipeline():
             "groq:llama-3.3-70b-versatile",
             temperature=0,
             api_key=GROQ_API_KEY,
+            max_retries=0,
             streaming=False,
         ).with_structured_output(ProductCategory)
 
         products: list[dict] = data["products"]
+        requests_per_second = float(os.getenv("GROQ_REQUESTS_PER_SECOND", "1.5"))
+        max_attempts = int(os.getenv("GROQ_MAX_ATTEMPTS", "8"))
+        retry_base_seconds = float(os.getenv("GROQ_RETRY_BASE_SECONDS", "2.0"))
+        retry_max_seconds = float(os.getenv("GROQ_RETRY_MAX_SECONDS", "30.0"))
+        min_request_interval = 1.0 / max(requests_per_second, 0.1)
+        last_request_at = 0.0
+
+        def invoke_with_retries(prompt: str) -> ProductCategory:
+            nonlocal last_request_at
+
+            for attempt in range(1, max_attempts + 1):
+                elapsed = time.monotonic() - last_request_at
+                if elapsed < min_request_interval:
+                    time.sleep(min_request_interval - elapsed)
+
+                try:
+                    result: ProductCategory = llm.invoke(prompt)
+                    last_request_at = time.monotonic()
+                    return result
+                except Exception as exc:
+                    message = str(exc).lower()
+                    rate_limited = (
+                        "429" in message
+                        or "rate limit" in message
+                        or "too many requests" in message
+                    )
+
+                    if (not rate_limited) or attempt == max_attempts:
+                        raise
+
+                    backoff = min(
+                        retry_max_seconds,
+                        retry_base_seconds * (2 ** (attempt - 1)),
+                    )
+                    sleep_seconds = backoff + random.uniform(0, backoff * 0.5)
+                    print(
+                        "[enrich_ai] Rate limit hit, "
+                        f"retrying in {sleep_seconds:.1f}s (attempt {attempt}/{max_attempts})"
+                    )
+                    time.sleep(sleep_seconds)
+
+            raise RuntimeError("[enrich_ai] Unreachable retry guard")
 
         # Deduplicate products to minimise API calls
         seen: dict[str, ProductCategory] = {}
@@ -263,7 +308,7 @@ def clickstream_pipeline():
                 "Classify this product into the most fitting category."
             )
 
-            result: ProductCategory = llm.invoke(prompt)
+            result = invoke_with_retries(prompt)
             seen[name] = result
             categorised[pid] = result.category
             print(f"[enrich_ai] {name!r} → {result.category} (confidence: {result.confidence:.2f})")
@@ -277,7 +322,7 @@ def clickstream_pipeline():
         for row in products:
             row["category"] = categorised.get(row["product_id"], "Other")
 
-        print(f"[enrich_ai] Enriched {len(categorised)} unique products")
+        print(f"[enrich_ai] Enriched {len(seen)} unique product prompts")
         return {"funnel": funnel_records, "products": products}
 
     # ── Task 5: Validate enriched data ────────────────────────────────────────
