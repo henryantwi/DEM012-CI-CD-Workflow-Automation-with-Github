@@ -138,34 +138,49 @@ jobs:
 
       - name: Wait for all services to become healthy
         run: |
+          set -euo pipefail
           echo "Waiting for services..."
           timeout 300 bash -c '
             while true; do
-              unhealthy=$(docker compose ps --format json \
+              pending=$(docker compose ps --format json \
                 | python3 -c "
           import sys, json
           items = [json.loads(l) for l in sys.stdin if l.strip()]
-          bad = [i[\"Name\"] for i in items
-                 if i.get(\"Health\") not in (\"healthy\", \"\", None)
-                    and i.get(\"State\") == \"running\"
-                    and i.get(\"Health\") == \"starting\"]
-          print(len(bad))
-          " 2>/dev/null || echo "0")
-              not_running=$(docker compose ps --format json \
-                | python3 -c "
-          import sys, json
-          items = [json.loads(l) for l in sys.stdin if l.strip()]
-          bad = [i[\"Name\"] for i in items
-                 if i.get(\"State\") != \"running\"
-                    and i.get(\"Service\") != \"airflow-init\"]
-          print(\" \".join(bad))
-          " 2>/dev/null || echo "")
-              if [ -z "$not_running" ] || [ "$not_running" = " " ]; then
-                echo "All services are running."
+          pending = []
+          for i in items:
+              if i.get(\"Service\") == \"airflow-init\":
+                  continue
+              service = i.get(\"Service\", \"unknown\")
+              state = (i.get(\"State\") or \"\").lower()
+              health = (i.get(\"Health\") or \"\").lower()
+              if state != \"running\":
+                  pending.append(\"{}:state={}\".format(service, state or \"unknown\"))
+              elif health and health != \"healthy\":
+                  pending.append(\"{}:health={}\".format(service, health))
+          print(\" \".join(pending))
+          " 2>/dev/null || echo "unknown")
+
+              if [ -z "$pending" ]; then
+                echo "All non-init services are running and healthy."
                 break
               fi
-              echo "Still waiting for: $not_running"
+
+              echo "Still waiting for: $pending"
               sleep 10
+            done
+          '
+
+      - name: Wait for Airflow API readiness
+        run: |
+          set -euo pipefail
+          echo "Waiting for Airflow API..."
+          timeout 180 bash -c '
+            until curl --fail --silent --show-error \
+              --retry 5 --retry-all-errors --retry-delay 2 \
+              -u admin:admin \
+              "http://localhost:8080/api/v1/health" > /dev/null; do
+              echo "Airflow API not ready yet..."
+              sleep 5
             done
           '
 
@@ -182,20 +197,30 @@ jobs:
       - name: Trigger clickstream_pipeline DAG
         id: trigger_dag
         run: |
+          set -euo pipefail
           DAG_RUN_ID="ci_cd_run_${{ github.run_id }}"
           echo "dag_run_id=$DAG_RUN_ID" >> $GITHUB_OUTPUT
 
-          curl -sf -X PATCH \
+          curl --fail --silent --show-error \
+            --retry 12 --retry-all-errors --retry-delay 5 --max-time 30 \
+            -X PATCH \
             "http://localhost:8080/api/v1/dags/clickstream_pipeline" \
             -H "Content-Type: application/json" \
             -u admin:admin \
-            -d '{"is_paused": false}'
+            -d '{"is_paused": false}' > /dev/null
 
-          curl -sf -X POST \
+          curl --fail --silent --show-error \
+            --retry 12 --retry-all-errors --retry-delay 5 --max-time 30 \
+            -X POST \
             "http://localhost:8080/api/v1/dags/clickstream_pipeline/dagRuns" \
             -H "Content-Type: application/json" \
             -u admin:admin \
-            -d "{\"dag_run_id\": \"$DAG_RUN_ID\"}"
+            -d "{\"dag_run_id\": \"$DAG_RUN_ID\"}" \
+            | python3 -m json.tool
+
+      - name: Show Airflow webserver logs on DAG trigger failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200 airflow-webserver
 
       # ── Poll until DAG succeeds (or timeout) ──────────────────────────────
       - name: Wait for DAG run to complete
@@ -206,7 +231,8 @@ jobs:
           INTERVAL=15
 
           while [ $ELAPSED -lt $MAX_WAIT ]; do
-            STATE=$(curl -sf \
+            STATE=$(curl --fail --silent --show-error \
+              --retry 6 --retry-all-errors --retry-delay 3 --max-time 20 \
               "http://localhost:8080/api/v1/dags/clickstream_pipeline/dagRuns/$DAG_RUN_ID" \
               -u admin:admin \
               | python3 -c "import sys, json; print(json.load(sys.stdin).get('state','unknown'))")
