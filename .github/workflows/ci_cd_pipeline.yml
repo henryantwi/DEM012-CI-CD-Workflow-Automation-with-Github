@@ -25,7 +25,7 @@ env:
   POSTGRES_PORT: "5432"
   MINIO_ROOT_USER: minioadmin
   MINIO_ROOT_PASSWORD: minioadmin
-  MINIO_ENDPOINT: http://localhost:9000
+  MINIO_ENDPOINT: http://minio:9000
   MINIO_BUCKET: clickstream-data
   METABASE_URL: http://localhost:3000
   # Airflow
