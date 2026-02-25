@@ -11,10 +11,9 @@ Data flow:  MinIO (raw CSV) → Airflow (Polars + LangChain) → PostgreSQL
 from __future__ import annotations
 
 import json
+import logging
 import os
-import random
 import tempfile
-import time
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -22,6 +21,8 @@ import polars as pl
 from airflow.decorators import dag, task
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
+
+from dags.enrichment_logic import build_enrichment_config_from_env, enrich_products_with_llm
 
 # ── DAG default args ───────────────────────────────────────────────────────────
 DEFAULT_ARGS = {
@@ -48,6 +49,7 @@ GE_SUITES_DIR = "/opt/airflow/great_expectations/expectations"
 
 # Session gap for sessionisation: 30 minutes without activity = new session
 SESSION_GAP_SECONDS = 30 * 60
+logger = logging.getLogger(__name__)
 
 
 # ── Pydantic schema for LangChain Structured Output ───────────────────────────
@@ -137,7 +139,7 @@ def clickstream_pipeline():
             name = key.split("/")[-1].replace(".csv", "")
             paths[name] = local_path
 
-        print(f"[extract] Downloaded files to {tmp_dir}: {list(paths.keys())}")
+        logger.info("[extract] Downloaded files to %s: %s", tmp_dir, list(paths.keys()))
         return paths
 
     # ── Task 2: Validate raw data ──────────────────────────────────────────────
@@ -149,7 +151,7 @@ def clickstream_pipeline():
 
         run_ge_suite(events_df, suite_path, task_name="validate_raw")
 
-        print(f"[validate_raw] All expectations passed for events ({len(events_df)} rows)")
+        logger.info("[validate_raw] All expectations passed for events (%s rows)", len(events_df))
         return paths
 
     # ── Task 3: Transform ──────────────────────────────────────────────────────
@@ -221,7 +223,7 @@ def clickstream_pipeline():
         funnel_records = funnel.to_dicts()
         products_records = products.to_dicts()
 
-        print(f"[transform] Funnel metrics computed for {len(funnel)} products")
+        logger.info("[transform] Funnel metrics computed for %s products", len(funnel))
         return {
             "funnel": funnel_records,
             "products": products_records,
@@ -238,127 +240,30 @@ def clickstream_pipeline():
         from langchain.chat_models import init_chat_model
 
         products: list[dict] = data["products"]
-        fail_open = os.getenv("AI_ENRICHMENT_FAIL_OPEN", "true").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        fallback_category = os.getenv("AI_ENRICHMENT_FALLBACK_CATEGORY", "Other")
-        requests_per_second = float(os.getenv("GROQ_REQUESTS_PER_SECOND", "0.8"))
-        max_attempts = int(os.getenv("GROQ_MAX_ATTEMPTS", "8"))
-        retry_base_seconds = float(os.getenv("GROQ_RETRY_BASE_SECONDS", "2.0"))
-        retry_max_seconds = float(os.getenv("GROQ_RETRY_MAX_SECONDS", "30.0"))
-        min_request_interval = 1.0 / max(requests_per_second, 0.1)
-        last_request_at = 0.0
+        config = build_enrichment_config_from_env()
+        llm = None
+        if GROQ_API_KEY:
+            llm = init_chat_model(
+                "groq:llama-3.3-70b-versatile",
+                temperature=0,
+                api_key=GROQ_API_KEY,
+                max_retries=0,
+                streaming=False,
+            ).with_structured_output(ProductCategory)
 
-        if not GROQ_API_KEY:
-            if fail_open:
-                print("[enrich_ai] GROQ_API_KEY is not set; using fallback categories")
-                for row in data["funnel"]:
-                    row["category"] = fallback_category
-                for row in products:
-                    row["category"] = fallback_category
-                return {"funnel": data["funnel"], "products": products}
-            raise ValueError("GROQ_API_KEY is not set and AI_ENRICHMENT_FAIL_OPEN=false")
-
-        llm = init_chat_model(
-            "groq:llama-3.3-70b-versatile",
-            temperature=0,
-            api_key=GROQ_API_KEY,
-            max_retries=0,
-            streaming=False,
-        ).with_structured_output(ProductCategory)
-
-        def invoke_with_retries(prompt: str) -> ProductCategory:
-            nonlocal last_request_at
-
-            for attempt in range(1, max_attempts + 1):
-                elapsed = time.monotonic() - last_request_at
-                if elapsed < min_request_interval:
-                    time.sleep(min_request_interval - elapsed)
-
-                try:
-                    result: ProductCategory = llm.invoke(prompt)
-                    last_request_at = time.monotonic()
-                    return result
-                except Exception as exc:
-                    message = str(exc).lower()
-                    rate_limited = (
-                        "429" in message
-                        or "rate limit" in message
-                        or "too many requests" in message
-                    )
-
-                    if (not rate_limited) or attempt == max_attempts:
-                        raise
-
-                    backoff = min(
-                        retry_max_seconds,
-                        retry_base_seconds * (2 ** (attempt - 1)),
-                    )
-                    sleep_seconds = backoff + random.uniform(0, backoff * 0.5)
-                    print(
-                        "[enrich_ai] Rate limit hit, "
-                        f"retrying in {sleep_seconds:.1f}s (attempt {attempt}/{max_attempts})"
-                    )
-                    time.sleep(sleep_seconds)
-
-            raise RuntimeError("[enrich_ai] Unreachable retry guard")
-
-        # Deduplicate products to minimise API calls
-        seen: dict[str, str] = {}
-        categorised: dict[str, str] = {}
-        fallback_count = 0
-
-        for product in products:
-            pid = product["product_id"]
-            name = product["name"]
-            desc = product.get("description", "")
-
-            if name in seen:
-                categorised[pid] = seen[name]
-                continue
-
-            prompt = (
-                f"Product name: {name}\n"
-                f"Description: {desc}\n\n"
-                "Classify this product into the most fitting category."
-            )
-
-            try:
-                result = invoke_with_retries(prompt)
-                seen[name] = result.category
-                categorised[pid] = result.category
-                print(
-                    f"[enrich_ai] {name!r} -> {result.category} "
-                    f"(confidence: {result.confidence:.2f})"
-                )
-            except Exception as exc:
-                if not fail_open:
-                    raise
-                fallback_count += 1
-                seen[name] = fallback_category
-                categorised[pid] = fallback_category
-                print(
-                    f"[enrich_ai] WARN fallback for {name!r}: {exc!s}. "
-                    f"Using category={fallback_category!r}"
-                )
-
-        # Merge category back into funnel records
-        funnel_records: list[dict] = data["funnel"]
-        for row in funnel_records:
-            row["category"] = categorised.get(row["product_id"], fallback_category)
-
-        # Also merge into products records
-        for row in products:
-            row["category"] = categorised.get(row["product_id"], fallback_category)
-
-        print(
-            f"[enrich_ai] Enriched {len(seen)} unique product prompts; "
-            f"fallbacks={fallback_count}"
+        funnel_records, enriched_products, stats = enrich_products_with_llm(
+            products=products,
+            funnel_records=data["funnel"],
+            llm=llm,
+            config=config,
+            log=logger,
         )
-        return {"funnel": funnel_records, "products": products}
+        logger.info(
+            "[enrich_ai] Enriched %s unique product prompts; fallbacks=%s",
+            stats["unique_prompts"],
+            stats["fallbacks"],
+        )
+        return {"funnel": funnel_records, "products": enriched_products}
 
     # ── Task 5: Validate enriched data ────────────────────────────────────────
     @task()
@@ -369,7 +274,7 @@ def clickstream_pipeline():
 
         run_ge_suite(funnel_df, suite_path, task_name="validate_enriched")
 
-        print(f"[validate_enriched] All expectations passed ({len(funnel_df)} rows)")
+        logger.info("[validate_enriched] All expectations passed (%s rows)", len(funnel_df))
         return data
 
     # ── Task 6: Load to PostgreSQL ─────────────────────────────────────────────
@@ -430,7 +335,7 @@ def clickstream_pipeline():
         with engine.connect() as conn:
             row_count = conn.execute(text("SELECT COUNT(*) FROM fact_funnel_metrics")).scalar()
 
-        print(f"[load] Loaded {row_count} rows into fact_funnel_metrics")
+        logger.info("[load] Loaded %s rows into fact_funnel_metrics", row_count)
 
     # ── Wire tasks ──────────────────────────────────────────────────────────────
     raw_paths = extract()
