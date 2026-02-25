@@ -187,6 +187,71 @@ jobs:
             done
           '
 
+      - name: Wait for clickstream_pipeline DAG to be registered
+        run: |
+          set -euo pipefail
+          DAG_ID="clickstream_pipeline"
+          DAG_URL="http://localhost:8080/api/v1/dags/$DAG_ID"
+          IMPORT_ERRORS_URL="http://localhost:8080/api/v1/importErrors?limit=20"
+          MAX_WAIT=300
+          ELAPSED=0
+          INTERVAL=10
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            HTTP_CODE=$(curl --silent --show-error \
+              --output /tmp/airflow_dag_response.json \
+              --write-out "%{http_code}" \
+              -u admin:admin \
+              "$DAG_URL" || true)
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "DAG '$DAG_ID' is registered."
+              break
+            fi
+
+            if [ "$HTTP_CODE" = "404" ]; then
+              echo "DAG '$DAG_ID' not visible yet (${ELAPSED}s elapsed)."
+              echo "Current Airflow import errors:"
+              curl --silent --show-error \
+                -u admin:admin \
+                "$IMPORT_ERRORS_URL" \
+                | python3 - <<'PY'
+          import json
+          import sys
+
+          try:
+              payload = json.load(sys.stdin)
+          except Exception as exc:
+              print(f"  Could not parse /importErrors response: {exc}")
+              raise SystemExit(0)
+
+          errors = payload.get("import_errors", [])
+          if not errors:
+              print("  (none)")
+          else:
+              for err in errors:
+                  filename = err.get("filename", "<unknown>")
+                  stack = (err.get("stack_trace") or err.get("error") or "").strip().splitlines()
+                  summary = stack[-1] if stack else "unknown import error"
+                  print(f"  - {filename}: {summary}")
+          PY
+              || true
+            else
+              echo "Unexpected Airflow status code while waiting for DAG: $HTTP_CODE"
+              cat /tmp/airflow_dag_response.json || true
+            fi
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          if [ $ELAPSED -ge $MAX_WAIT ]; then
+            echo "Timed out waiting for DAG '$DAG_ID' to be registered."
+            docker compose logs --no-color --tail=200 airflow-scheduler
+            docker compose logs --no-color --tail=200 airflow-webserver
+            exit 1
+          fi
+
       - name: Show service status
         run: docker compose ps
 
