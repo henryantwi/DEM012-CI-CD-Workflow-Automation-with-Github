@@ -192,7 +192,6 @@ jobs:
           set -euo pipefail
           DAG_ID="clickstream_pipeline"
           DAG_URL="http://localhost:8080/api/v1/dags/$DAG_ID"
-          IMPORT_ERRORS_URL="http://localhost:8080/api/v1/importErrors?limit=20"
           MAX_WAIT=300
           ELAPSED=0
           INTERVAL=10
@@ -211,33 +210,8 @@ jobs:
 
             if [ "$HTTP_CODE" = "404" ]; then
               echo "DAG '$DAG_ID' not visible yet (${ELAPSED}s elapsed)."
-              echo "Current Airflow import errors:"
-              if ! curl --silent --show-error \
-                -u admin:admin \
-                "$IMPORT_ERRORS_URL" \
-                | python3 - <<'PY'
-          import json
-          import sys
-
-          try:
-              payload = json.load(sys.stdin)
-          except Exception as exc:
-              print(f"  Could not parse /importErrors response: {exc}")
-              raise SystemExit(0)
-
-          errors = payload.get("import_errors", [])
-          if not errors:
-              print("  (none)")
-          else:
-              for err in errors:
-                  filename = err.get("filename", "<unknown>")
-                  stack = (err.get("stack_trace") or err.get("error") or "").strip().splitlines()
-                  summary = stack[-1] if stack else "unknown import error"
-                  print(f"  - {filename}: {summary}")
-          PY
-              then
-                echo "Could not fetch or parse Airflow import errors."
-              fi
+              echo "Current Airflow import errors (scheduler CLI):"
+              docker compose exec -T airflow-scheduler airflow dags list-import-errors || true
             else
               echo "Unexpected Airflow status code while waiting for DAG: $HTTP_CODE"
               cat /tmp/airflow_dag_response.json || true

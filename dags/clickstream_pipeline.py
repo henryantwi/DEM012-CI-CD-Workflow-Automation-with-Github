@@ -22,7 +22,12 @@ from airflow.decorators import dag, task
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 
-from dags.enrichment_logic import build_enrichment_config_from_env, enrich_products_with_llm
+try:
+    # Airflow adds DAGS_FOLDER to PYTHONPATH, so sibling imports should be plain.
+    from enrichment_logic import build_enrichment_config_from_env, enrich_products_with_llm
+except ModuleNotFoundError:
+    # Fallback for local execution contexts where project root is on PYTHONPATH.
+    from dags.enrichment_logic import build_enrichment_config_from_env, enrich_products_with_llm
 
 # ── DAG default args ───────────────────────────────────────────────────────────
 DEFAULT_ARGS = {
