@@ -95,7 +95,7 @@ cd DEM012-CI-CD-Workflow-Automation-with-Github
 cp .env.example .env
 # Then open .env and fill in:
 #   GROQ_API_KEY=gsk-...
-#   AIRFLOW__CORE__FERNET_KEY=<run: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
+#   AIRFLOW__CORE__FERNET_KEY=<run: python -c "from cryptography.fernet import Fernet; import sys; sys.stdout.write(Fernet.generate_key().decode())">
 #   AIRFLOW__WEBSERVER__SECRET_KEY=<random string>
 #   # Optional Groq rate-limit tuning:
 #   GROQ_REQUESTS_PER_SECOND=1.5
@@ -189,6 +189,14 @@ If your account/model quota is tighter, lower `GROQ_REQUESTS_PER_SECOND` (for ex
    - `dim_products` — products with AI-assigned categories
    - `fact_funnel_metrics` — per-product conversion rates by session
 
+### 7 — Add screenshots to documentation
+
+Store screenshots under `docs/screenshots/` and update the placeholders:
+
+- [Screenshot Asset Notes](docs/screenshots/README.md)
+- [Dashboard Screenshot Placeholders](docs/screenshots/dashboard-screenshots.md)
+- [Pipeline Screenshot Placeholders](docs/screenshots/pipeline-screenshots.md)
+
 ---
 
 ## Running Tests
@@ -261,6 +269,11 @@ uv run pre-commit install   # one-time setup
 ├── docker/
 │   └── airflow/
 │       └── Dockerfile              # Custom Airflow image (uv-based deps)
+├── docs/
+│   └── screenshots/
+│       ├── README.md               # Screenshot asset conventions
+│       ├── dashboard-screenshots.md
+│       └── pipeline-screenshots.md
 ├── great_expectations/
 │   └── expectations/
 │       ├── raw_events_suite.json
