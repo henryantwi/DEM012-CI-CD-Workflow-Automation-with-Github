@@ -19,6 +19,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -41,6 +42,7 @@ PG_CONN = (
 METABASE_URL = os.getenv("METABASE_URL", "http://localhost:3000")
 
 EXPECTED_KEYS = ["raw/users.csv", "raw/products.csv", "raw/events.csv"]
+logger = logging.getLogger(__name__)
 
 
 # ── Check functions ────────────────────────────────────────────────────────────
@@ -50,7 +52,7 @@ def check_minio() -> bool:
     import boto3
     from botocore.exceptions import ClientError
 
-    print("\n[1/3] Checking MinIO...")
+    logger.info("[1/3] Checking MinIO...")
     try:
         client = boto3.client(
             "s3",
@@ -60,13 +62,13 @@ def check_minio() -> bool:
         )
         for key in EXPECTED_KEYS:
             client.head_object(Bucket=MINIO_BUCKET, Key=key)
-            print(f"  [OK]  s3://{MINIO_BUCKET}/{key} exists")
+            logger.info("  [OK]  s3://%s/%s exists", MINIO_BUCKET, key)
         return True
     except ClientError as exc:
-        print(f"  [FAIL]  MinIO check failed: {exc}")
+        logger.error("  [FAIL]  MinIO check failed: %s", exc)
         return False
     except Exception as exc:  # noqa: BLE001
-        print(f"  [FAIL]  MinIO connection error: {exc}")
+        logger.error("  [FAIL]  MinIO connection error: %s", exc)
         return False
 
 
@@ -74,7 +76,7 @@ def check_postgres() -> bool:
     """Verify that fact_funnel_metrics contains rows."""
     from sqlalchemy import create_engine, text
 
-    print("\n[2/3] Checking PostgreSQL...")
+    logger.info("[2/3] Checking PostgreSQL...")
     try:
         engine = create_engine(PG_CONN)
         with engine.connect() as conn:
@@ -82,13 +84,13 @@ def check_postgres() -> bool:
                 text("SELECT COUNT(*) FROM fact_funnel_metrics")
             ).scalar()
         if row_count and row_count > 0:
-            print(f"  [OK]  fact_funnel_metrics has {row_count} rows")
+            logger.info("  [OK]  fact_funnel_metrics has %s rows", row_count)
             return True
         else:
-            print("  [FAIL]  fact_funnel_metrics is empty")
+            logger.error("  [FAIL]  fact_funnel_metrics is empty")
             return False
     except Exception as exc:  # noqa: BLE001
-        print(f"  [FAIL]  PostgreSQL check failed: {exc}")
+        logger.error("  [FAIL]  PostgreSQL check failed: %s", exc)
         return False
 
 
@@ -96,37 +98,40 @@ def check_metabase(max_retries: int = 5, delay: int = 10) -> bool:
     """Verify that the Metabase health endpoint returns {'status': 'ok'}."""
     import requests
 
-    print("\n[3/3] Checking Metabase...")
+    logger.info("[3/3] Checking Metabase...")
     url = f"{METABASE_URL}/api/health"
 
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200 and resp.json().get("status") == "ok":
-                print(f"  [OK]  Metabase healthy at {url}")
+                logger.info("  [OK]  Metabase healthy at %s", url)
                 return True
             else:
-                print(
-                    f"  [WARN]  Attempt {attempt}: status={resp.status_code} "
-                    f"body={resp.text[:80]}"
+                logger.warning(
+                    "  [WARN]  Attempt %s: status=%s body=%s",
+                    attempt,
+                    resp.status_code,
+                    resp.text[:80],
                 )
         except requests.RequestException as exc:
-            print(f"  [WARN]  Attempt {attempt}: connection error - {exc}")
+            logger.warning("  [WARN]  Attempt %s: connection error - %s", attempt, exc)
 
         if attempt < max_retries:
-            print(f"     Retrying in {delay}s...")
+            logger.info("     Retrying in %ss...", delay)
             time.sleep(delay)
 
-    print(f"  [FAIL]  Metabase not healthy after {max_retries} attempts")
+    logger.error("  [FAIL]  Metabase not healthy after %s attempts", max_retries)
     return False
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    print("=" * 55)
-    print("  Clickstream Platform - End-to-End Validation")
-    print("=" * 55)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logger.info("%s", "=" * 55)
+    logger.info("  Clickstream Platform - End-to-End Validation")
+    logger.info("%s", "=" * 55)
 
     results = {
         "MinIO": check_minio(),
@@ -134,22 +139,22 @@ def main() -> None:
         "Metabase": check_metabase(),
     }
 
-    print("\n" + "=" * 55)
-    print("  Results Summary")
-    print("=" * 55)
+    logger.info("%s", "=" * 55)
+    logger.info("  Results Summary")
+    logger.info("%s", "=" * 55)
     all_passed = True
     for name, passed in results.items():
         status = "PASS [OK]" if passed else "FAIL [X]"
-        print(f"  {name:<20} {status}")
+        logger.info("  %-20s %s", name, status)
         if not passed:
             all_passed = False
 
-    print("=" * 55)
+    logger.info("%s", "=" * 55)
     if all_passed:
-        print("  All data flow checks passed!")
+        logger.info("  All data flow checks passed!")
         sys.exit(0)
     else:
-        print("  One or more checks FAILED - see output above.")
+        logger.error("  One or more checks FAILED - see output above.")
         sys.exit(1)
 
 

@@ -1,6 +1,6 @@
 scripts:
     # ── Setup ──────────────────────────────────────────────────────────────────
-    fernet-key: uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    fernet-key: uv run python -c "from cryptography.fernet import Fernet; import sys; sys.stdout.write(Fernet.generate_key().decode())"
     install: uv sync
 
     # ── Platform lifecycle ─────────────────────────────────────────────────────

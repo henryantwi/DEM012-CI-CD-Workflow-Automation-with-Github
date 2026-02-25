@@ -16,6 +16,7 @@ Environment variables (copy .env.example → .env):
 from __future__ import annotations
 
 import io
+import logging
 import os
 import random
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "minioadmin")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "clickstream-data")
+logger = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -40,7 +42,7 @@ def _env_int(name: str, default: int) -> int:
             raise ValueError
         return parsed
     except ValueError:
-        print(f"[warn] Invalid {name}={value!r}; using default {default}")
+        logger.warning("Invalid %s=%r; using default %s", name, value, default)
         return default
 
 
@@ -186,7 +188,7 @@ def ensure_bucket(client, bucket: str) -> None:
         client.head_bucket(Bucket=bucket)
     except ClientError:
         client.create_bucket(Bucket=bucket)
-        print(f"[minio] Created bucket: {bucket}")
+        logger.info("[minio] Created bucket: %s", bucket)
 
 
 def upload_dataframe(client, df: pl.DataFrame, bucket: str, key: str) -> None:
@@ -194,13 +196,14 @@ def upload_dataframe(client, df: pl.DataFrame, bucket: str, key: str) -> None:
     df.write_csv(buffer)
     buffer.seek(0)
     client.put_object(Bucket=bucket, Key=key, Body=buffer.getvalue())
-    print(f"[minio] Uploaded  s3://{bucket}/{key}  ({len(df)} rows)")
+    logger.info("[minio] Uploaded  s3://%s/%s  (%s rows)", bucket, key, len(df))
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    print("=== Clickstream Data Generator ===")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logger.info("=== Clickstream Data Generator ===")
 
     users_df = generate_users()
     products_df = generate_products()
@@ -209,7 +212,12 @@ def main() -> None:
         product_ids=products_df["product_id"].to_list(),
     )
 
-    print(f"Generated: {len(users_df)} users, {len(products_df)} products, {len(events_df)} events")
+    logger.info(
+        "Generated: %s users, %s products, %s events",
+        len(users_df),
+        len(products_df),
+        len(events_df),
+    )
 
     client = get_minio_client()
     ensure_bucket(client, MINIO_BUCKET)
@@ -218,7 +226,7 @@ def main() -> None:
     upload_dataframe(client, products_df, MINIO_BUCKET, "raw/products.csv")
     upload_dataframe(client, events_df, MINIO_BUCKET, "raw/events.csv")
 
-    print("=== Upload complete ===")
+    logger.info("=== Upload complete ===")
 
 
 if __name__ == "__main__":

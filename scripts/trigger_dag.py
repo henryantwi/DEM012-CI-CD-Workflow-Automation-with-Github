@@ -8,9 +8,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 from datetime import datetime, timezone
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,6 +26,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
     auth = (args.username, args.password)
     run_id = f"manual_run_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
@@ -47,13 +51,13 @@ def main() -> int:
         )
         trigger_resp.raise_for_status()
     except requests.RequestException as exc:
-        print(f"[FAIL] Could not trigger DAG: {exc}")
+        logger.error("[FAIL] Could not trigger DAG: %s", exc)
         return 1
 
     payload = trigger_resp.json()
-    print(f"[OK] Triggered DAG '{args.dag_id}'")
-    print(f"     dag_run_id: {payload.get('dag_run_id', run_id)}")
-    print(f"     state: {payload.get('state', 'unknown')}")
+    logger.info("[OK] Triggered DAG '%s'", args.dag_id)
+    logger.info("dag_run_id: %s", payload.get("dag_run_id", run_id))
+    logger.info("state: %s", payload.get("state", "unknown"))
     return 0
 
 
