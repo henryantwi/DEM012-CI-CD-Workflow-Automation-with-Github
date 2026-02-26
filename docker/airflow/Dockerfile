@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Custom Airflow image with project dependencies installed via uv
 # Reference: https://docs.astral.sh/uv/guides/integration/docker/
 FROM apache/airflow:2.9.1-python3.11
@@ -19,7 +20,8 @@ COPY pyproject.toml uv.lock* ./
 
 # Install all project dependencies directly into the system Python
 # (no virtualenv inside the container — matches uv Docker best practice)
-RUN uv pip install --system \
+RUN --mount=type=cache,target=/home/airflow/.cache/uv,uid=50000,gid=0,mode=0775 \
+    uv pip install --system \
     polars \
     boto3 \
     "great-expectations>=0.18,<1.0" \

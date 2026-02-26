@@ -3,6 +3,11 @@
   "expectation_suite_name": "raw_events_suite",
   "expectations": [
     {
+      "expectation_type": "expect_table_row_count_to_be_between",
+      "kwargs": {"min_value": 1},
+      "meta": {"notes": "Reject empty datasets to prevent TRUNCATE of good data"}
+    },
+    {
       "expectation_type": "expect_column_to_exist",
       "kwargs": {"column": "event_id"},
       "meta": {}
@@ -25,6 +30,11 @@
     {
       "expectation_type": "expect_column_to_exist",
       "kwargs": {"column": "timestamp"},
+      "meta": {}
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_unique",
+      "kwargs": {"column": "event_id"},
       "meta": {}
     },
     {

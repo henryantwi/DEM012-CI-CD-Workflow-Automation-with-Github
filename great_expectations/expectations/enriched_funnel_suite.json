@@ -3,6 +3,11 @@
   "expectation_suite_name": "enriched_funnel_suite",
   "expectations": [
     {
+      "expectation_type": "expect_table_row_count_to_be_between",
+      "kwargs": {"min_value": 1},
+      "meta": {"notes": "Reject empty datasets to prevent TRUNCATE of good data"}
+    },
+    {
       "expectation_type": "expect_column_to_exist",
       "kwargs": {"column": "product_id"},
       "meta": {}
@@ -35,6 +40,11 @@
     {
       "expectation_type": "expect_column_to_exist",
       "kwargs": {"column": "cart_to_purchase_rate"},
+      "meta": {}
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_unique",
+      "kwargs": {"column": "product_id"},
       "meta": {}
     },
     {

@@ -48,7 +48,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 60s
+      start_period: 15s
 
   # ── MinIO ────────────────────────────────────────────────────────────────────
   minio:
@@ -95,7 +95,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 20s
     restart: unless-stopped
 
   # ── Airflow Scheduler ─────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 120s
+      start_period: 45s
     restart: unless-stopped
 
 volumes:

@@ -34,21 +34,37 @@ DEFAULT_ARGS = {
     "owner": "data-engineering",
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
+    "on_failure_callback": lambda ctx: logger.error(
+        "🔴 TASK FAILED: dag=%s task=%s run=%s try=%s exception=%s",
+        ctx.get("dag").dag_id if ctx.get("dag") else "unknown",
+        ctx.get("task_instance").task_id if ctx.get("task_instance") else "unknown",
+        ctx.get("dag_run").run_id if ctx.get("dag_run") else "unknown",
+        ctx.get("task_instance").try_number if ctx.get("task_instance") else "?",
+        ctx.get("exception", "N/A"),
+    ),
+    # To add email/Slack alerts, configure Airflow SMTP or use:
+    #   "email_on_failure": True, "email": ["team@example.com"]
 }
 
 # ── Environment ────────────────────────────────────────────────────────────────
-MINIO_ENDPOINT = os.environ["MINIO_ENDPOINT"]
-MINIO_ACCESS_KEY = os.environ["MINIO_ROOT_USER"]
-MINIO_SECRET_KEY = os.environ["MINIO_ROOT_PASSWORD"]
-MINIO_BUCKET = os.environ["MINIO_BUCKET"]
+# Deferred to task execution to avoid crashing the DAG parser (which blocks ALL DAGs).
 
-PG_CONN = (
-    f"postgresql+psycopg2://{os.environ['POSTGRES_USER']}:"
-    f"{os.environ['POSTGRES_PASSWORD']}@{os.environ['POSTGRES_HOST']}:"
-    f"{os.environ['POSTGRES_PORT']}/{os.environ['POSTGRES_DB']}"
-)
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+def _get_minio_config() -> tuple[str, str, str, str]:
+    return (
+        os.environ["MINIO_ENDPOINT"],
+        os.environ["MINIO_ROOT_USER"],
+        os.environ["MINIO_ROOT_PASSWORD"],
+        os.environ["MINIO_BUCKET"],
+    )
+
+
+def _get_pg_conn() -> str:
+    return (
+        f"postgresql+psycopg2://{os.environ['POSTGRES_USER']}:"
+        f"{os.environ['POSTGRES_PASSWORD']}@{os.environ['POSTGRES_HOST']}:"
+        f"{os.environ['POSTGRES_PORT']}/{os.environ['POSTGRES_DB']}"
+    )
 
 GE_SUITES_DIR = "/opt/airflow/great_expectations/expectations"
 
@@ -119,6 +135,7 @@ def run_ge_suite(df: pl.DataFrame, suite_path: str, task_name: str) -> None:
     start_date=datetime(2025, 1, 1),
     schedule="@daily",
     catchup=False,
+    max_active_runs=1,
     tags=["clickstream", "etl", "ai"],
 )
 def clickstream_pipeline():
@@ -127,36 +144,73 @@ def clickstream_pipeline():
     def extract() -> dict[str, str]:
         """Download raw CSVs from MinIO to a temporary directory."""
         import boto3
+        from botocore.config import Config as BotoConfig
+
+        minio_endpoint, minio_access_key, minio_secret_key, minio_bucket = _get_minio_config()
 
         client = boto3.client(
             "s3",
-            endpoint_url=MINIO_ENDPOINT,
-            aws_access_key_id=MINIO_ACCESS_KEY,
-            aws_secret_access_key=MINIO_SECRET_KEY,
+            endpoint_url=minio_endpoint,
+            aws_access_key_id=minio_access_key,
+            aws_secret_access_key=minio_secret_key,
+            config=BotoConfig(connect_timeout=10, read_timeout=30),
         )
+
+        # Pre-flight: verify all expected files exist before downloading
+        expected_keys = ["raw/events.csv", "raw/products.csv", "raw/users.csv"]
+        missing = []
+        for key in expected_keys:
+            try:
+                client.head_object(Bucket=minio_bucket, Key=key)
+            except client.exceptions.NoSuchKey:
+                missing.append(key)
+            except Exception:
+                missing.append(key)
+        if missing:
+            raise FileNotFoundError(
+                f"MinIO bucket '{minio_bucket}' is missing required files: {missing}. "
+                "Run the data generator first: uv run python data_generator/generate_data.py"
+            )
 
         tmp_dir = tempfile.mkdtemp(prefix="clickstream_")
         paths: dict[str, str] = {}
 
-        for key in ("raw/users.csv", "raw/products.csv", "raw/events.csv"):
-            local_path = os.path.join(tmp_dir, key.replace("/", "_"))
-            client.download_file(MINIO_BUCKET, key, local_path)
-            name = key.split("/")[-1].replace(".csv", "")
-            paths[name] = local_path
+        try:
+            for key in expected_keys:
+                local_path = os.path.join(tmp_dir, key.replace("/", "_"))
+                client.download_file(minio_bucket, key, local_path)
+                name = key.split("/")[-1].replace(".csv", "")
+                paths[name] = local_path
+        except Exception:
+            import shutil
 
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+
+        paths["_tmp_dir"] = tmp_dir
         logger.info("[extract] Downloaded files to %s: %s", tmp_dir, list(paths.keys()))
         return paths
 
     # ── Task 2: Validate raw data ──────────────────────────────────────────────
     @task()
     def validate_raw(paths: dict[str, str]) -> dict[str, str]:
-        """Run Great Expectations validation on the raw events CSV."""
+        """Run Great Expectations validation on all raw CSVs."""
         events_df = pl.read_csv(paths["events"])
         suite_path = os.path.join(GE_SUITES_DIR, "raw_events_suite.json")
+        run_ge_suite(events_df, suite_path, task_name="validate_raw/events")
 
-        run_ge_suite(events_df, suite_path, task_name="validate_raw")
+        users_df = pl.read_csv(paths["users"])
+        users_suite = os.path.join(GE_SUITES_DIR, "raw_users_suite.json")
+        run_ge_suite(users_df, users_suite, task_name="validate_raw/users")
 
-        logger.info("[validate_raw] All expectations passed for events (%s rows)", len(events_df))
+        products_df = pl.read_csv(paths["products"])
+        products_suite = os.path.join(GE_SUITES_DIR, "raw_products_suite.json")
+        run_ge_suite(products_df, products_suite, task_name="validate_raw/products")
+
+        logger.info(
+            "[validate_raw] All expectations passed — events=%s, users=%s, products=%s rows",
+            len(events_df), len(users_df), len(products_df),
+        )
         return paths
 
     # ── Task 3: Transform ──────────────────────────────────────────────────────
@@ -167,10 +221,23 @@ def clickstream_pipeline():
         1. Sessionise events (30-min gap threshold)
         2. Compute per-product funnel metrics (view → cart → purchase rates)
         """
+        import shutil
+
         events = pl.read_csv(paths["events"]).with_columns(
-            pl.col("timestamp").str.to_datetime(time_zone="UTC", strict=False)
+            pl.col("timestamp").str.to_datetime(time_zone="UTC", strict=True)
         )
         products = pl.read_csv(paths["products"])
+
+        if len(events) == 0:
+            raise ValueError("[transform] events.csv is empty — aborting to prevent data loss")
+        if len(products) == 0:
+            raise ValueError("[transform] products.csv is empty — aborting to prevent data loss")
+
+        # Clean up temp directory from extract (T8)
+        tmp_dir = paths.get("_tmp_dir")
+        if tmp_dir and os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            logger.info("[transform] Cleaned up temp dir: %s", tmp_dir)
 
         # ── Sessionisation ─────────────────────────────────────────────────────
         events = (
@@ -228,6 +295,17 @@ def clickstream_pipeline():
         funnel_records = funnel.to_dicts()
         products_records = products.to_dicts()
 
+        # XCom size warning (T9) — use JSON length, not str() which doubles memory
+        import json as _json
+
+        payload_size = len(_json.dumps(funnel_records)) + len(_json.dumps(products_records))
+        if payload_size > 40_000:
+            logger.warning(
+                "[transform] XCom payload is ~%s bytes — may exceed Airflow metadata DB limits. "
+                "Consider writing to MinIO and passing object keys instead.",
+                payload_size,
+            )
+
         logger.info("[transform] Funnel metrics computed for %s products", len(funnel))
         return {
             "funnel": funnel_records,
@@ -244,17 +322,24 @@ def clickstream_pipeline():
         """
         from langchain.chat_models import init_chat_model
 
+        groq_api_key = os.getenv("GROQ_API_KEY", "")
         products: list[dict] = data["products"]
         config = build_enrichment_config_from_env()
         llm = None
-        if GROQ_API_KEY:
+        if groq_api_key:
             llm = init_chat_model(
                 "groq:llama-3.3-70b-versatile",
                 temperature=0,
-                api_key=GROQ_API_KEY,
+                api_key=groq_api_key,
                 max_retries=0,
                 streaming=False,
             ).with_structured_output(ProductCategory)
+        else:
+            logger.warning(
+                "[enrich_ai] GROQ_API_KEY is not set — AI enrichment disabled, "
+                "using fallback category '%s'",
+                config.fallback_category,
+            )
 
         funnel_records, enriched_products, stats = enrich_products_with_llm(
             products=products,
@@ -286,13 +371,27 @@ def clickstream_pipeline():
     @task()
     def load(data: dict) -> None:
         """Upsert enriched funnel metrics and product dimension into PostgreSQL."""
-        engine = create_engine(PG_CONN)
+        engine = create_engine(
+            _get_pg_conn(),
+            pool_pre_ping=True,
+            pool_timeout=10,
+            connect_args={"connect_timeout": 10},
+        )
 
         funnel_df = pl.DataFrame(data["funnel"])
         products_df = pl.DataFrame(data["products"])
 
+        if len(funnel_df) == 0:
+            raise ValueError(
+                "[load] Refusing to load empty funnel data — would destroy existing data"
+            )
+        if len(products_df) == 0:
+            raise ValueError(
+                "[load] Refusing to load empty products data — would destroy existing data"
+            )
+
+        # Atomic: TRUNCATE + INSERT in a single transaction to prevent data loss
         with engine.begin() as conn:
-            # Create tables if not exists
             conn.execute(
                 text("""
                 CREATE TABLE IF NOT EXISTS dim_products (
@@ -320,22 +419,19 @@ def clickstream_pipeline():
                 )
                 """)
             )
-
-        # Write via Polars + SQLAlchemy (upsert via truncate-and-replace for simplicity)
-        with engine.begin() as conn:
             conn.execute(text("TRUNCATE TABLE dim_products"))
             conn.execute(text("TRUNCATE TABLE fact_funnel_metrics"))
 
-        products_df.to_pandas().to_sql(
-            "dim_products", engine, if_exists="append", index=False
-        )
-        funnel_df.select(
-            [
-                "product_id", "name", "category",
-                "view_count", "cart_count", "purchase_count",
-                "view_to_cart_rate", "cart_to_purchase_rate",
-            ]
-        ).to_pandas().to_sql("fact_funnel_metrics", engine, if_exists="append", index=False)
+            products_df.to_pandas().to_sql(
+                "dim_products", conn, if_exists="append", index=False
+            )
+            funnel_df.select(
+                [
+                    "product_id", "name", "category",
+                    "view_count", "cart_count", "purchase_count",
+                    "view_to_cart_rate", "cart_to_purchase_rate",
+                ]
+            ).to_pandas().to_sql("fact_funnel_metrics", conn, if_exists="append", index=False)
 
         with engine.connect() as conn:
             row_count = conn.execute(text("SELECT COUNT(*) FROM fact_funnel_metrics")).scalar()
