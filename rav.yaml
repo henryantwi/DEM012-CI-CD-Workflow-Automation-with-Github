@@ -11,7 +11,8 @@ scripts:
     logs: docker compose logs -f
 
     # ── Data pipeline ──────────────────────────────────────────────────────────
-    seed: uv run python data_generator/generate_data.py
+    seed: uv run python data_generator/generate_data.py --mode seed
+    batch: uv run python data_generator/generate_data.py --mode batch
     trigger: python scripts/trigger_dag.py
     validate: uv run python scripts/validate_data_flow.py
 

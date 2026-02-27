@@ -218,3 +218,94 @@ class TestDataGeneratorShapes:
         assert set(df["event_type"].unique().to_list()).issubset(
             {"view", "add_to_cart", "purchase"}
         )
+
+
+# ── Multi-batch concatenation tests ──────────────────────────────────────────
+
+
+class TestMultiBatchFunnel:
+    """Test funnel metrics computed from multiple concatenated batch DataFrames."""
+
+    def test_funnel_from_two_batches(self):
+        batch1 = pl.DataFrame(
+            {
+                "event_id": ["e1", "e2"],
+                "user_id": ["u1", "u1"],
+                "product_id": ["p1", "p1"],
+                "event_type": ["view", "add_to_cart"],
+                "timestamp": pl.Series([_ts("2024-01-01T10:00:00"), _ts("2024-01-01T10:05:00")]),
+            }
+        )
+        batch2 = pl.DataFrame(
+            {
+                "event_id": ["e3", "e4"],
+                "user_id": ["u1", "u2"],
+                "product_id": ["p1", "p2"],
+                "event_type": ["purchase", "view"],
+                "timestamp": pl.Series([_ts("2024-01-02T10:00:00"), _ts("2024-01-02T11:00:00")]),
+            }
+        )
+        combined = pl.concat([batch1, batch2])
+        result = compute_funnel_metrics(combined)
+        p1 = result.filter(pl.col("product_id") == "p1").row(0, named=True)
+        assert p1["view_count"] == 1
+        assert p1["cart_count"] == 1
+        assert p1["purchase_count"] == 1
+
+    def test_cross_batch_sessions(self):
+        """Events from different batches for same user should be sessionised correctly."""
+        batch1 = pl.DataFrame(
+            {
+                "event_id": ["e1"],
+                "user_id": ["u1"],
+                "product_id": ["p1"],
+                "event_type": ["view"],
+                "timestamp": pl.Series([_ts("2024-01-01T10:00:00")]),
+            }
+        )
+        batch2 = pl.DataFrame(
+            {
+                "event_id": ["e2"],
+                "user_id": ["u1"],
+                "product_id": ["p1"],
+                "event_type": ["add_to_cart"],
+                # 2 hours later => new session
+                "timestamp": pl.Series([_ts("2024-01-01T12:00:00")]),
+            }
+        )
+        combined = pl.concat([batch1, batch2])
+        result = sessionise(combined)
+        u1_sessions = (
+            result.filter(pl.col("user_id") == "u1")
+            .select("computed_session_id").unique()
+        )
+        assert len(u1_sessions) == 2  # 2-hour gap > 30-min threshold
+
+    def test_cross_batch_same_session(self):
+        """Events from different batches within 30-min window should share session."""
+        batch1 = pl.DataFrame(
+            {
+                "event_id": ["e1"],
+                "user_id": ["u1"],
+                "product_id": ["p1"],
+                "event_type": ["view"],
+                "timestamp": pl.Series([_ts("2024-01-01T10:00:00")]),
+            }
+        )
+        batch2 = pl.DataFrame(
+            {
+                "event_id": ["e2"],
+                "user_id": ["u1"],
+                "product_id": ["p1"],
+                "event_type": ["add_to_cart"],
+                # 10 minutes later => same session
+                "timestamp": pl.Series([_ts("2024-01-01T10:10:00")]),
+            }
+        )
+        combined = pl.concat([batch1, batch2])
+        result = sessionise(combined)
+        u1_sessions = (
+            result.filter(pl.col("user_id") == "u1")
+            .select("computed_session_id").unique()
+        )
+        assert len(u1_sessions) == 1

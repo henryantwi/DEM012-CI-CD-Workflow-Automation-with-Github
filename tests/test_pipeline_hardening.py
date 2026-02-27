@@ -359,3 +359,54 @@ class TestGESuiteStructure:
         types = [e["expectation_type"] for e in suite["expectations"]]
         assert "expect_table_row_count_to_be_between" in types
         assert "expect_column_values_to_be_unique" in types
+
+
+# ── Incremental pipeline tests ────────────────────────────────────────────────
+
+
+class TestIncrementalPipeline:
+    """Tests for incremental batch processing behaviour."""
+
+    def test_dag_imports_airflow_skip_exception(self):
+        """DAG should import AirflowSkipException for skip-on-empty."""
+
+        dag_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "dags", "clickstream_pipeline.py"
+        )
+        with open(dag_path) as f:
+            source = f.read()
+
+        assert "AirflowSkipException" in source
+
+    def test_dag_creates_processed_batches_table(self):
+        """DAG should reference processed_batches table creation."""
+        dag_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "dags", "clickstream_pipeline.py"
+        )
+        with open(dag_path) as f:
+            source = f.read()
+
+        assert "processed_batches" in source
+        assert "CREATE TABLE IF NOT EXISTS processed_batches" in source
+
+    def test_dag_creates_fact_events_table(self):
+        """DAG should reference fact_events table creation."""
+        dag_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "dags", "clickstream_pipeline.py"
+        )
+        with open(dag_path) as f:
+            source = f.read()
+
+        assert "fact_events" in source
+        assert "CREATE TABLE IF NOT EXISTS fact_events" in source
+
+    def test_dag_lists_event_batches_from_minio(self):
+        """DAG extract should use list_objects_v2 with raw/events/ prefix."""
+        dag_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "dags", "clickstream_pipeline.py"
+        )
+        with open(dag_path) as f:
+            source = f.read()
+
+        assert "raw/events/" in source
+        assert "list_objects_v2" in source

@@ -29,8 +29,18 @@ def _install_fake_boto(monkeypatch, client, client_error_type):
     monkeypatch.setitem(sys.modules, "botocore.exceptions", botocore_exc_mod)
 
 
-def _install_fake_sqlalchemy(monkeypatch, row_count: int):
+def _install_fake_sqlalchemy(monkeypatch, row_counts: dict[str, int] | int):
+    """Accept either a single int (all tables return same count) or a dict of table->count."""
     sqlalchemy_mod = types.ModuleType("sqlalchemy")
+
+    if isinstance(row_counts, int):
+        counts = {
+            "fact_funnel_metrics": row_counts,
+            "fact_events": row_counts,
+            "processed_batches": row_counts,
+        }
+    else:
+        counts = row_counts
 
     class FakeConn:
         def __enter__(self):
@@ -40,7 +50,10 @@ def _install_fake_sqlalchemy(monkeypatch, row_count: int):
             return False
 
         def execute(self, query):
-            return types.SimpleNamespace(scalar=lambda: row_count)
+            for table_name, count in counts.items():
+                if table_name in query:
+                    return types.SimpleNamespace(scalar=lambda c=count: c)
+            return types.SimpleNamespace(scalar=lambda: 0)
 
     class FakeEngine:
         def connect(self):
@@ -83,6 +96,9 @@ def test_check_minio_success(monkeypatch):
         def head_object(self, Bucket, Key):
             self.seen_keys.append(Key)
 
+        def list_objects_v2(self, Bucket, Prefix, MaxKeys=1000):
+            return {"KeyCount": 1, "Contents": [{"Key": f"{Prefix}batch_001.csv"}]}
+
     client = FakeMinioClient()
     _install_fake_boto(monkeypatch, client, FakeClientError)
 
@@ -98,19 +114,47 @@ def test_check_minio_client_error_returns_false(monkeypatch):
         def head_object(self, Bucket, Key):
             raise FakeClientError("missing")
 
+        def list_objects_v2(self, Bucket, Prefix, MaxKeys=1000):
+            return {"KeyCount": 0}
+
+    _install_fake_boto(monkeypatch, FakeMinioClient(), FakeClientError)
+
+    assert vdf.check_minio() is False
+
+
+def test_check_minio_no_event_batches_returns_false(monkeypatch):
+    class FakeClientError(Exception):
+        pass
+
+    class FakeMinioClient:
+        def head_object(self, Bucket, Key):
+            pass  # dimension files exist
+
+        def list_objects_v2(self, Bucket, Prefix, MaxKeys=1000):
+            return {"KeyCount": 0}
+
     _install_fake_boto(monkeypatch, FakeMinioClient(), FakeClientError)
 
     assert vdf.check_minio() is False
 
 
 def test_check_postgres_true_when_rows_exist(monkeypatch):
-    _install_fake_sqlalchemy(monkeypatch, row_count=42)
+    _install_fake_sqlalchemy(monkeypatch, row_counts=42)
 
     assert vdf.check_postgres() is True
 
 
 def test_check_postgres_false_when_empty(monkeypatch):
-    _install_fake_sqlalchemy(monkeypatch, row_count=0)
+    _install_fake_sqlalchemy(monkeypatch, row_counts=0)
+
+    assert vdf.check_postgres() is False
+
+
+def test_check_postgres_false_when_fact_events_empty(monkeypatch):
+    _install_fake_sqlalchemy(
+        monkeypatch,
+        row_counts={"fact_funnel_metrics": 10, "fact_events": 0, "processed_batches": 1},
+    )
 
     assert vdf.check_postgres() is False
 

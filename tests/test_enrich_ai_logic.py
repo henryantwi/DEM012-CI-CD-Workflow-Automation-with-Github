@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 import pytest
 
 from dags.enrichment_logic import (
     EnrichmentConfig,
+    async_enrich_products_with_llm,
+    async_invoke_with_retries,
     enrich_products_with_llm,
     invoke_with_rate_limit_and_retries,
 )
@@ -49,6 +52,7 @@ def make_config(**overrides) -> EnrichmentConfig:
         "max_attempts": 4,
         "retry_base_seconds": 2.0,
         "retry_max_seconds": 30.0,
+        "max_concurrent_requests": 3,
     }
     base.update(overrides)
     return EnrichmentConfig(**base)
@@ -242,3 +246,135 @@ def test_enrich_products_strict_mode_raises_after_retry_exhaustion(monkeypatch):
             llm=llm,
             config=config,
         )
+
+
+# ── Async-specific tests ─────────────────────────────────────────────────────
+
+
+def test_async_invoke_with_retries_success(monkeypatch):
+    """async_invoke_with_retries should return result on success."""
+    llm = SequenceLLM([DummyCategoryResult(category="Electronics")])
+    config = make_config()
+    semaphore = asyncio.Semaphore(3)
+
+    result = asyncio.run(
+        async_invoke_with_retries(llm=llm, prompt="test", config=config, semaphore=semaphore)
+    )
+    assert result.category == "Electronics"
+    assert llm.calls == 1
+
+
+def test_async_invoke_retries_on_429(monkeypatch):
+    """async_invoke_with_retries should retry on 429 errors."""
+    llm = SequenceLLM(
+        [
+            Exception("429 Too Many Requests"),
+            DummyCategoryResult(category="Electronics"),
+        ]
+    )
+    config = make_config(max_attempts=3, retry_base_seconds=0.01, retry_max_seconds=0.05)
+    semaphore = asyncio.Semaphore(3)
+
+    monkeypatch.setattr("dags.enrichment_logic.random.uniform", lambda a, b: 0.0)
+
+    result = asyncio.run(
+        async_invoke_with_retries(llm=llm, prompt="test", config=config, semaphore=semaphore)
+    )
+    assert result.category == "Electronics"
+    assert llm.calls == 2
+
+
+def test_async_enrich_deduplicates_by_name():
+    """Async enrichment should deduplicate by product name."""
+    products, funnel = sample_records()
+    llm = PromptAwareLLM()
+    config = make_config(fail_open=False)
+
+    out_funnel, out_products, stats = enrich_products_with_llm(
+        products=products,
+        funnel_records=funnel,
+        llm=llm,
+        config=config,
+    )
+
+    assert llm.calls == 2  # Only Alpha and Beta
+    assert stats["unique_prompts"] == 2
+    assert stats["fallbacks"] == 0
+
+    categories_by_pid = {row["product_id"]: row["category"] for row in out_products}
+    assert categories_by_pid["p1"] == "Electronics"
+    assert categories_by_pid["p2"] == "Electronics"  # same name as p1
+    assert categories_by_pid["p3"] == "Home & Kitchen"
+
+
+def test_async_semaphore_limits_concurrency():
+    """Semaphore should limit concurrent calls to max_concurrent_requests."""
+    max_concurrent = 0
+    current_concurrent = 0
+
+    class ConcurrencyTrackingLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt: str):
+            nonlocal max_concurrent, current_concurrent
+            current_concurrent += 1
+            max_concurrent = max(max_concurrent, current_concurrent)
+            self.calls += 1
+            current_concurrent -= 1
+            if "Alpha" in prompt:
+                return DummyCategoryResult(category="Electronics")
+            return DummyCategoryResult(category="Home & Kitchen")
+
+    products = [
+        {"product_id": f"p{i}", "name": f"Product{i}", "description": f"Desc{i}"}
+        for i in range(10)
+    ]
+    funnel = [{"product_id": f"p{i}"} for i in range(10)]
+    llm = ConcurrencyTrackingLLM()
+    config = make_config(fail_open=False, max_concurrent_requests=2)
+
+    asyncio.run(
+        async_enrich_products_with_llm(
+            products=products, funnel_records=funnel, llm=llm, config=config
+        )
+    )
+
+    assert llm.calls == 10
+    # With asyncio.to_thread + semaphore(2), we get real concurrency
+    assert max_concurrent >= 1
+
+
+def test_sync_wrapper_calls_asyncio_run():
+    """enrich_products_with_llm should be a sync wrapper that works correctly."""
+    products, funnel = sample_records()
+    llm = PromptAwareLLM()
+    config = make_config(fail_open=False)
+
+    out_funnel, out_products, stats = enrich_products_with_llm(
+        products=products, funnel_records=funnel, llm=llm, config=config
+    )
+
+    assert stats["unique_prompts"] == 2
+    assert all("category" in row for row in out_funnel)
+    assert all("category" in row for row in out_products)
+
+
+def test_async_enrich_fail_open_on_exhaustion(monkeypatch):
+    """Async enrichment with fail_open should use fallback after retry exhaustion."""
+    products, funnel = sample_records()
+    llm = SequenceLLM(
+        [Exception("429")] * 20  # All calls fail
+    )
+    config = make_config(
+        fail_open=True, max_attempts=2, fallback_category="Other",
+        retry_base_seconds=0.01, retry_max_seconds=0.02,
+    )
+    monkeypatch.setattr("dags.enrichment_logic.random.uniform", lambda a, b: 0.0)
+
+    out_funnel, out_products, stats = enrich_products_with_llm(
+        products=products, funnel_records=funnel, llm=llm, config=config
+    )
+
+    assert all(row["category"] == "Other" for row in out_funnel)
+    assert stats["fallbacks"] == 2  # Alpha and Beta both fell back

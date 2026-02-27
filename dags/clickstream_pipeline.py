@@ -5,7 +5,12 @@ Orchestrates the full ETL + AI enrichment flow:
 
   extract → validate_raw → transform → enrich_ai → validate_enriched → load
 
-Data flow:  MinIO (raw CSV) → Airflow (Polars + LangChain) → PostgreSQL
+Data flow:  MinIO (raw CSV batches) → Airflow (Polars + LangChain) → PostgreSQL
+
+Incremental behaviour:
+  - extract scans MinIO for new event batches not yet in `processed_batches`
+  - transform recalculates funnel metrics from ALL events across all batches
+  - load appends new events to `fact_events` and records processed batch keys
 """
 
 from __future__ import annotations
@@ -19,14 +24,13 @@ from typing import Literal
 
 import polars as pl
 from airflow.decorators import dag, task
+from airflow.exceptions import AirflowSkipException
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 
 try:
-    # Airflow adds DAGS_FOLDER to PYTHONPATH, so sibling imports should be plain.
     from enrichment_logic import build_enrichment_config_from_env, enrich_products_with_llm
 except ModuleNotFoundError:
-    # Fallback for local execution contexts where project root is on PYTHONPATH.
     from dags.enrichment_logic import build_enrichment_config_from_env, enrich_products_with_llm
 
 # ── DAG default args ───────────────────────────────────────────────────────────
@@ -140,8 +144,8 @@ def run_ge_suite(df: pl.DataFrame, suite_path: str, task_name: str) -> None:
 def clickstream_pipeline():
     # ── Task 1: Extract ────────────────────────────────────────────────────────
     @task()
-    def extract() -> dict[str, str]:
-        """Download raw CSVs from MinIO to a temporary directory."""
+    def extract() -> dict:
+        """Download new event batches and dimension files from MinIO."""
         import boto3
         from botocore.config import Config as BotoConfig
 
@@ -155,94 +159,138 @@ def clickstream_pipeline():
             config=BotoConfig(connect_timeout=10, read_timeout=30),
         )
 
-        # Pre-flight: verify all expected files exist before downloading
-        expected_keys = ["raw/events.csv", "raw/products.csv", "raw/users.csv"]
-        missing = []
-        for key in expected_keys:
-            try:
-                client.head_object(Bucket=minio_bucket, Key=key)
-            except client.exceptions.NoSuchKey:
-                missing.append(key)
-            except Exception:
-                missing.append(key)
-        if missing:
-            raise FileNotFoundError(
-                f"MinIO bucket '{minio_bucket}' is missing required files: {missing}. "
-                "Run the data generator first: uv run python data_generator/generate_data.py"
+        # List all event batch keys under raw/events/ prefix
+        response = client.list_objects_v2(Bucket=minio_bucket, Prefix="raw/events/")
+        all_batch_keys = [
+            obj["Key"]
+            for obj in response.get("Contents", [])
+            if obj["Key"].endswith(".csv")
+        ]
+
+        # Query processed_batches to find already-processed keys
+        engine = create_engine(
+            _get_pg_conn(), pool_pre_ping=True, connect_args={"connect_timeout": 10}
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS processed_batches "
+                    "(batch_key TEXT PRIMARY KEY, processed_at TIMESTAMPTZ DEFAULT NOW())"
+                )
+            )
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT batch_key FROM processed_batches"))
+            processed_keys = {row[0] for row in result}
+
+        new_batch_keys = [k for k in all_batch_keys if k not in processed_keys]
+
+        if not new_batch_keys:
+            raise AirflowSkipException(
+                "No new event batches found in MinIO — skipping downstream tasks."
             )
 
+        # Download new batch files + dimension tables
         tmp_dir = tempfile.mkdtemp(prefix="clickstream_")
-        paths: dict[str, str] = {}
+        event_files: list[str] = []
 
         try:
-            for key in expected_keys:
-                local_path = os.path.join(tmp_dir, key.replace("/", "_"))
+            for key in new_batch_keys:
+                safe_name = key.replace("/", "_")
+                local_path = os.path.join(tmp_dir, safe_name)
                 client.download_file(minio_bucket, key, local_path)
-                name = key.split("/")[-1].replace(".csv", "")
-                paths[name] = local_path
+                event_files.append(local_path)
+
+            # Download dimension tables
+            users_path = os.path.join(tmp_dir, "raw_users.csv")
+            products_path = os.path.join(tmp_dir, "raw_products.csv")
+            client.download_file(minio_bucket, "raw/users.csv", users_path)
+            client.download_file(minio_bucket, "raw/products.csv", products_path)
         except Exception:
             import shutil
-
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
 
-        paths["_tmp_dir"] = tmp_dir
-        logger.info("[extract] Downloaded files to %s: %s", tmp_dir, list(paths.keys()))
-        return paths
+        logger.info(
+            "[extract] Found %s new batches (of %s total). Downloaded to %s",
+            len(new_batch_keys),
+            len(all_batch_keys),
+            tmp_dir,
+        )
+        return {
+            "event_files": event_files,
+            "batch_keys": new_batch_keys,
+            "users": users_path,
+            "products": products_path,
+            "_tmp_dir": tmp_dir,
+            "_minio_bucket": minio_bucket,
+        }
 
     # ── Task 2: Validate raw data ──────────────────────────────────────────────
     @task()
-    def validate_raw(paths: dict[str, str]) -> dict[str, str]:
-        """Run Great Expectations validation on all raw CSVs."""
-        events_df = pl.read_csv(paths["events"])
-        suite_path = os.path.join(GE_SUITES_DIR, "raw_events_suite.json")
-        run_ge_suite(events_df, suite_path, task_name="validate_raw/events")
+    def validate_raw(extract_data: dict) -> dict:
+        """Run Great Expectations validation on new event batches and dimension tables."""
+        # Validate each event batch file
+        events_suite = os.path.join(GE_SUITES_DIR, "raw_events_suite.json")
+        for event_file in extract_data["event_files"]:
+            events_df = pl.read_csv(event_file)
+            run_ge_suite(
+                events_df, events_suite,
+                task_name=f"validate_raw/events/{os.path.basename(event_file)}",
+            )
 
-        users_df = pl.read_csv(paths["users"])
+        users_df = pl.read_csv(extract_data["users"])
         users_suite = os.path.join(GE_SUITES_DIR, "raw_users_suite.json")
         run_ge_suite(users_df, users_suite, task_name="validate_raw/users")
 
-        products_df = pl.read_csv(paths["products"])
+        products_df = pl.read_csv(extract_data["products"])
         products_suite = os.path.join(GE_SUITES_DIR, "raw_products_suite.json")
         run_ge_suite(products_df, products_suite, task_name="validate_raw/products")
 
         logger.info(
-            "[validate_raw] All expectations passed — events=%s, users=%s, products=%s rows",
-            len(events_df),
-            len(users_df),
-            len(products_df),
+            "[validate_raw] All expectations passed — %s event batch(es), users, products",
+            len(extract_data["event_files"]),
         )
-        return paths
+        return extract_data
 
     # ── Task 3: Transform ──────────────────────────────────────────────────────
     @task()
-    def transform(paths: dict[str, str]) -> dict:
+    def transform(extract_data: dict) -> dict:
         """
         Polars transformations:
-        1. Sessionise events (30-min gap threshold)
-        2. Compute per-product funnel metrics (view → cart → purchase rates)
+        1. Concatenate new event batch CSVs
+        2. Sessionise new events
+        3. Read ALL events from MinIO to recompute funnel metrics from scratch
         """
         import shutil
 
-        events = pl.read_csv(paths["events"]).with_columns(
+        import boto3
+        from botocore.config import Config as BotoConfig
+
+        # Concatenate new event batch files
+        new_event_dfs = []
+        for event_file in extract_data["event_files"]:
+            df = pl.read_csv(event_file)
+            new_event_dfs.append(df)
+
+        new_events = pl.concat(new_event_dfs).with_columns(
             pl.col("timestamp").str.to_datetime(time_zone="UTC", strict=True)
         )
-        products = pl.read_csv(paths["products"])
+        products = pl.read_csv(extract_data["products"])
 
-        if len(events) == 0:
-            raise ValueError("[transform] events.csv is empty — aborting to prevent data loss")
+        if len(new_events) == 0:
+            raise ValueError("[transform] No events in new batches — aborting")
         if len(products) == 0:
             raise ValueError("[transform] products.csv is empty — aborting to prevent data loss")
 
-        # Clean up temp directory from extract (T8)
-        tmp_dir = paths.get("_tmp_dir")
+        # Clean up temp directory from extract
+        tmp_dir = extract_data.get("_tmp_dir")
         if tmp_dir and os.path.isdir(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
             logger.info("[transform] Cleaned up temp dir: %s", tmp_dir)
 
-        # ── Sessionisation ─────────────────────────────────────────────────────
-        events = (
-            events.sort(["user_id", "timestamp"])
+        # ── Sessionise new events ──────────────────────────────────────────────
+        new_events = (
+            new_events.sort(["user_id", "timestamp"])
             .with_columns(
                 pl.col("timestamp")
                 .diff()
@@ -267,9 +315,34 @@ def clickstream_pipeline():
             )
         )
 
-        # ── Funnel metrics per product ─────────────────────────────────────────
+        # ── Read ALL events from MinIO for full funnel recalculation ───────────
+        minio_endpoint, minio_access_key, minio_secret_key, minio_bucket = _get_minio_config()
+        client = boto3.client(
+            "s3",
+            endpoint_url=minio_endpoint,
+            aws_access_key_id=minio_access_key,
+            aws_secret_access_key=minio_secret_key,
+            config=BotoConfig(connect_timeout=10, read_timeout=30),
+        )
+
+        response = client.list_objects_v2(Bucket=minio_bucket, Prefix="raw/events/")
+        all_event_dfs = []
+        for obj in response.get("Contents", []):
+            if obj["Key"].endswith(".csv"):
+                obj_data = client.get_object(Bucket=minio_bucket, Key=obj["Key"])
+                df = pl.read_csv(obj_data["Body"].read())
+                all_event_dfs.append(df)
+
+        if not all_event_dfs:
+            raise ValueError("[transform] No event batches found in MinIO at all")
+
+        all_events = pl.concat(all_event_dfs).with_columns(
+            pl.col("timestamp").str.to_datetime(time_zone="UTC", strict=True)
+        )
+
+        # ── Funnel metrics from ALL events per product ─────────────────────────
         funnel = (
-            events.group_by("product_id")
+            all_events.group_by("product_id")
             .agg(
                 (pl.col("event_type") == "view").sum().alias("view_count"),
                 (pl.col("event_type") == "add_to_cart").sum().alias("cart_count"),
@@ -292,25 +365,36 @@ def clickstream_pipeline():
             )
         )
 
-        # Serialize to JSON for XCom (Polars → dict)
+        # Serialize to JSON for XCom
         funnel_records = funnel.to_dicts()
         products_records = products.to_dicts()
+        new_events_records = new_events.select(
+            ["event_id", "user_id", "product_id", "event_type", "timestamp", "session_id"]
+        ).with_columns(pl.col("timestamp").cast(pl.Utf8)).to_dicts()
 
-        # XCom size warning (T9) — use JSON length, not str() which doubles memory
         import json as _json
 
-        payload_size = len(_json.dumps(funnel_records)) + len(_json.dumps(products_records))
+        payload_size = (
+            len(_json.dumps(funnel_records))
+            + len(_json.dumps(products_records))
+            + len(_json.dumps(new_events_records))
+        )
         if payload_size > 40_000:
             logger.warning(
-                "[transform] XCom payload is ~%s bytes — may exceed Airflow metadata DB limits. "
-                "Consider writing to MinIO and passing object keys instead.",
+                "[transform] XCom payload is ~%s bytes — may exceed Airflow metadata DB limits.",
                 payload_size,
             )
 
-        logger.info("[transform] Funnel metrics computed for %s products", len(funnel))
+        logger.info(
+            "[transform] Funnel metrics from %s total events across all batches for %s products",
+            len(all_events),
+            len(funnel),
+        )
         return {
             "funnel": funnel_records,
             "products": products_records,
+            "new_events": new_events_records,
+            "batch_keys": extract_data["batch_keys"],
         }
 
     # ── Task 4: AI Enrichment ──────────────────────────────────────────────────
@@ -371,7 +455,7 @@ def clickstream_pipeline():
     # ── Task 6: Load to PostgreSQL ─────────────────────────────────────────────
     @task()
     def load(data: dict) -> None:
-        """Upsert enriched funnel metrics and product dimension into PostgreSQL."""
+        """Upsert enriched funnel metrics, product dimension, and new events into PostgreSQL."""
         engine = create_engine(
             _get_pg_conn(),
             pool_pre_ping=True,
@@ -381,6 +465,8 @@ def clickstream_pipeline():
 
         funnel_df = pl.DataFrame(data["funnel"])
         products_df = pl.DataFrame(data["products"])
+        new_events_df = pl.DataFrame(data.get("new_events", []))
+        batch_keys: list[str] = data.get("batch_keys", [])
 
         if len(funnel_df) == 0:
             raise ValueError(
@@ -391,7 +477,6 @@ def clickstream_pipeline():
                 "[load] Refusing to load empty products data — would destroy existing data"
             )
 
-        # Atomic: TRUNCATE + INSERT in a single transaction to prevent data loss
         with engine.begin() as conn:
             conn.execute(
                 text("""
@@ -420,7 +505,29 @@ def clickstream_pipeline():
                 )
                 """)
             )
+            conn.execute(
+                text("""
+                CREATE TABLE IF NOT EXISTS fact_events (
+                    event_id    TEXT PRIMARY KEY,
+                    user_id     TEXT,
+                    product_id  TEXT,
+                    event_type  TEXT,
+                    timestamp   TEXT,
+                    session_id  TEXT,
+                    loaded_at   TIMESTAMPTZ DEFAULT NOW()
+                )
+                """)
+            )
+            conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS processed_batches "
+                    "(batch_key TEXT PRIMARY KEY, processed_at TIMESTAMPTZ DEFAULT NOW())"
+                )
+            )
+
+            # Dimension tables: full refresh
             conn.execute(text("TRUNCATE TABLE dim_products"))
+            # Funnel metrics: full refresh (recalculated from all data)
             conn.execute(text("TRUNCATE TABLE fact_funnel_metrics"))
 
             products_df.to_pandas().to_sql("dim_products", conn, if_exists="append", index=False)
@@ -437,15 +544,47 @@ def clickstream_pipeline():
                 ]
             ).to_pandas().to_sql("fact_funnel_metrics", conn, if_exists="append", index=False)
 
+            # Append new events (ON CONFLICT DO NOTHING for idempotency)
+            if len(new_events_df) > 0:
+                for row in new_events_df.to_dicts():
+                    conn.execute(
+                        text(
+                            "INSERT INTO fact_events "
+                            "(event_id, user_id, product_id, event_type, "
+                            "timestamp, session_id) "
+                            "VALUES (:event_id, :user_id, :product_id, "
+                            ":event_type, :timestamp, :session_id) "
+                            "ON CONFLICT (event_id) DO NOTHING"
+                        ),
+                        row,
+                    )
+
+            # Record processed batch keys
+            for key in batch_keys:
+                conn.execute(
+                    text(
+                        "INSERT INTO processed_batches (batch_key) "
+                        "VALUES (:key) ON CONFLICT DO NOTHING"
+                    ),
+                    {"key": key},
+                )
+
         with engine.connect() as conn:
             row_count = conn.execute(text("SELECT COUNT(*) FROM fact_funnel_metrics")).scalar()
+            events_count = conn.execute(text("SELECT COUNT(*) FROM fact_events")).scalar()
 
-        logger.info("[load] Loaded %s rows into fact_funnel_metrics", row_count)
+        logger.info(
+            "[load] Loaded %s rows into fact_funnel_metrics, %s total events in fact_events, "
+            "%s batch(es) recorded",
+            row_count,
+            events_count,
+            len(batch_keys),
+        )
 
     # ── Wire tasks ──────────────────────────────────────────────────────────────
-    raw_paths = extract()
-    validated_paths = validate_raw(raw_paths)
-    transformed = transform(validated_paths)
+    extract_data = extract()
+    validated_data = validate_raw(extract_data)
+    transformed = transform(validated_data)
     enriched = enrich_ai(transformed)
     validated_enriched = validate_enriched(enriched)
     load(validated_enriched)
