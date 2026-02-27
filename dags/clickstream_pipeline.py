@@ -438,7 +438,12 @@ def clickstream_pipeline():
             stats["unique_prompts"],
             stats["fallbacks"],
         )
-        return {"funnel": funnel_records, "products": enriched_products}
+        return {
+            "funnel": funnel_records,
+            "products": enriched_products,
+            "new_events": data.get("new_events", []),
+            "batch_keys": data.get("batch_keys", []),
+        }
 
     # ── Task 5: Validate enriched data ────────────────────────────────────────
     @task()
