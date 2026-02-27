@@ -70,6 +70,7 @@ def _run_ge_suite_standalone(df: pd.DataFrame, suite_path: str, task_name: str) 
 
 # ── T10: Deferred env var access ──────────────────────────────────────────────
 
+
 class TestDeferredEnvVars:
     """Verify that the DAG module can be parsed without env vars set."""
 
@@ -117,6 +118,7 @@ class TestDeferredEnvVars:
 
 
 # ── T2 + T7: GE suite hardening ──────────────────────────────────────────────
+
 
 class TestGESuiteHardening:
     """Verify that GE suites reject empty DataFrames and duplicate keys."""
@@ -199,6 +201,7 @@ class TestGESuiteHardening:
 
 
 # ── T6: Users and products GE suites ─────────────────────────────────────────
+
 
 class TestNewGESuites:
     """Verify the new users and products validation suites."""
@@ -294,6 +297,7 @@ class TestNewGESuites:
 
 # ── T3: DAG concurrency limit ────────────────────────────────────────────────
 
+
 class TestDAGConfig:
     """Verify DAG-level config for concurrency safety."""
 
@@ -317,6 +321,7 @@ class TestDAGConfig:
 
 
 # ── GE suite JSON structure tests ─────────────────────────────────────────────
+
 
 class TestGESuiteStructure:
     """Verify that GE suite JSON files have required expectation types."""

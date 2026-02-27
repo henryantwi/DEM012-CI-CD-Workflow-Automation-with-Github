@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 # ── Check functions ────────────────────────────────────────────────────────────
 
+
 def check_minio() -> bool:
     """Verify that all three raw CSV files exist in the MinIO bucket."""
     import boto3
@@ -80,9 +81,7 @@ def check_postgres() -> bool:
     try:
         engine = create_engine(PG_CONN)
         with engine.connect() as conn:
-            row_count = conn.execute(
-                text("SELECT COUNT(*) FROM fact_funnel_metrics")
-            ).scalar()
+            row_count = conn.execute(text("SELECT COUNT(*) FROM fact_funnel_metrics")).scalar()
         if row_count and row_count > 0:
             logger.info("  [OK]  fact_funnel_metrics has %s rows", row_count)
             return True
@@ -126,6 +125,7 @@ def check_metabase(max_retries: int = 5, delay: int = 10) -> bool:
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

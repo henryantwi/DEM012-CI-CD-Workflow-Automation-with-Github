@@ -66,6 +66,7 @@ def _get_pg_conn() -> str:
         f"{os.environ['POSTGRES_PORT']}/{os.environ['POSTGRES_DB']}"
     )
 
+
 GE_SUITES_DIR = "/opt/airflow/great_expectations/expectations"
 
 # Session gap for sessionisation: 30 minutes without activity = new session
@@ -87,9 +88,7 @@ class ProductCategory(BaseModel):
         "Books & Stationery",
         "Other",
     ] = Field(description="The most fitting product category")
-    confidence: float = Field(
-        ge=0.0, le=1.0, description="Confidence score between 0 and 1"
-    )
+    confidence: float = Field(ge=0.0, le=1.0, description="Confidence score between 0 and 1")
 
 
 def run_ge_suite(df: pl.DataFrame, suite_path: str, task_name: str) -> None:
@@ -209,7 +208,9 @@ def clickstream_pipeline():
 
         logger.info(
             "[validate_raw] All expectations passed — events=%s, users=%s, products=%s rows",
-            len(events_df), len(users_df), len(products_df),
+            len(events_df),
+            len(users_df),
+            len(products_df),
         )
         return paths
 
@@ -422,14 +423,17 @@ def clickstream_pipeline():
             conn.execute(text("TRUNCATE TABLE dim_products"))
             conn.execute(text("TRUNCATE TABLE fact_funnel_metrics"))
 
-            products_df.to_pandas().to_sql(
-                "dim_products", conn, if_exists="append", index=False
-            )
+            products_df.to_pandas().to_sql("dim_products", conn, if_exists="append", index=False)
             funnel_df.select(
                 [
-                    "product_id", "name", "category",
-                    "view_count", "cart_count", "purchase_count",
-                    "view_to_cart_rate", "cart_to_purchase_rate",
+                    "product_id",
+                    "name",
+                    "category",
+                    "view_count",
+                    "cart_count",
+                    "purchase_count",
+                    "view_to_cart_rate",
+                    "cart_to_purchase_rate",
                 ]
             ).to_pandas().to_sql("fact_funnel_metrics", conn, if_exists="append", index=False)
 

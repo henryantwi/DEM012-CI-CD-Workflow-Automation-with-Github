@@ -44,11 +44,7 @@ def sessionise(events: pl.DataFrame) -> pl.DataFrame:
     return (
         events.sort(["user_id", "timestamp"])
         .with_columns(
-            pl.col("timestamp")
-            .diff()
-            .over("user_id")
-            .dt.total_seconds()
-            .alias("time_since_prev")
+            pl.col("timestamp").diff().over("user_id").dt.total_seconds().alias("time_since_prev")
         )
         .with_columns(
             (
@@ -69,6 +65,7 @@ def sessionise(events: pl.DataFrame) -> pl.DataFrame:
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
 
 def _ts(iso: str) -> datetime:
     return datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
@@ -97,6 +94,7 @@ def sample_events() -> pl.DataFrame:
 
 
 # ── Funnel metric tests ───────────────────────────────────────────────────────
+
 
 class TestFunnelMetrics:
     def test_view_count_correct(self, sample_events):
@@ -159,6 +157,7 @@ class TestFunnelMetrics:
 
 # ── Sessionisation tests ──────────────────────────────────────────────────────
 
+
 class TestSessionisation:
     def test_session_column_created(self, sample_events):
         result = sessionise(sample_events)
@@ -168,9 +167,7 @@ class TestSessionisation:
         """Events < 30 min apart for same user should share a session."""
         result = sessionise(sample_events)
         u1_sessions = (
-            result.filter(pl.col("user_id") == "u1")
-            .select("computed_session_id")
-            .unique()
+            result.filter(pl.col("user_id") == "u1").select("computed_session_id").unique()
         )
         # u1's three events are all within 10 minutes → one session
         assert len(u1_sessions) == 1
@@ -179,9 +176,7 @@ class TestSessionisation:
         """u2 last event is 45 min after the previous one → new session."""
         result = sessionise(sample_events)
         u2_sessions = (
-            result.filter(pl.col("user_id") == "u2")
-            .select("computed_session_id")
-            .unique()
+            result.filter(pl.col("user_id") == "u2").select("computed_session_id").unique()
         )
         assert len(u2_sessions) == 2
 
@@ -193,9 +188,11 @@ class TestSessionisation:
 
 # ── Data generator shape tests ────────────────────────────────────────────────
 
+
 class TestDataGeneratorShapes:
     def test_generate_users_shape(self):
         import sys
+
         sys.path.insert(0, ".")
         from data_generator.generate_data import generate_users
 

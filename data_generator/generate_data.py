@@ -51,13 +51,34 @@ NUM_PRODUCTS = _env_int("NUM_PRODUCTS", 50)
 NUM_EVENTS = _env_int("NUM_EVENTS", 2000)
 
 PRODUCT_ADJECTIVES = [
-    "Wireless", "Portable", "Smart", "Ergonomic", "Ultra", "Pro", "Compact",
-    "Deluxe", "Premium", "Eco-Friendly",
+    "Wireless",
+    "Portable",
+    "Smart",
+    "Ergonomic",
+    "Ultra",
+    "Pro",
+    "Compact",
+    "Deluxe",
+    "Premium",
+    "Eco-Friendly",
 ]
 PRODUCT_NOUNS = [
-    "Headphones", "Keyboard", "Mouse", "Monitor", "Desk Lamp", "Chair",
-    "Backpack", "Notebook", "Water Bottle", "Running Shoes", "T-Shirt",
-    "Blender", "Coffee Maker", "Yoga Mat", "Sunglasses", "Watch",
+    "Headphones",
+    "Keyboard",
+    "Mouse",
+    "Monitor",
+    "Desk Lamp",
+    "Chair",
+    "Backpack",
+    "Notebook",
+    "Water Bottle",
+    "Running Shoes",
+    "T-Shirt",
+    "Blender",
+    "Coffee Maker",
+    "Yoga Mat",
+    "Sunglasses",
+    "Watch",
 ]
 
 fake = Faker()
@@ -66,6 +87,7 @@ Faker.seed(42)
 
 
 # ── Generators ─────────────────────────────────────────────────────────────────
+
 
 def generate_users(n: int = NUM_USERS) -> pl.DataFrame:
     """Generate synthetic user profiles."""
@@ -76,8 +98,7 @@ def generate_users(n: int = NUM_USERS) -> pl.DataFrame:
             "email": [fake.email() for _ in range(n)],
             "country": [fake.country_code() for _ in range(n)],
             "signup_date": [
-                fake.date_between(start_date="-2y", end_date="today").isoformat()
-                for _ in range(n)
+                fake.date_between(start_date="-2y", end_date="today").isoformat() for _ in range(n)
             ],
             "age": [random.randint(18, 65) for _ in range(n)],
         }
@@ -87,12 +108,9 @@ def generate_users(n: int = NUM_USERS) -> pl.DataFrame:
 def generate_products(n: int = NUM_PRODUCTS) -> pl.DataFrame:
     """Generate synthetic product catalogue with raw names for AI categorisation."""
     names = [
-        f"{random.choice(PRODUCT_ADJECTIVES)} {random.choice(PRODUCT_NOUNS)}"
-        for _ in range(n)
+        f"{random.choice(PRODUCT_ADJECTIVES)} {random.choice(PRODUCT_NOUNS)}" for _ in range(n)
     ]
-    descriptions = [
-        f"{fake.sentence(nb_words=8)} {fake.sentence(nb_words=6)}" for _ in range(n)
-    ]
+    descriptions = [f"{fake.sentence(nb_words=8)} {fake.sentence(nb_words=6)}" for _ in range(n)]
     return pl.DataFrame(
         {
             "product_id": [f"p_{i:03d}" for i in range(1, n + 1)],
@@ -121,9 +139,7 @@ def generate_events(
     for _ in range(n):
         user_id = random.choice(user_ids)
         product_id = random.choice(product_ids)
-        event_time = base_time + timedelta(
-            seconds=random.randint(0, 30 * 24 * 3600)
-        )
+        event_time = base_time + timedelta(seconds=random.randint(0, 30 * 24 * 3600))
 
         # Always record a view
         rows.append(
@@ -170,6 +186,7 @@ def generate_events(
 
 # ── MinIO helpers ──────────────────────────────────────────────────────────────
 
+
 def get_minio_client():
     import boto3  # lazy import — not needed in unit tests
 
@@ -200,6 +217,7 @@ def upload_dataframe(client, df: pl.DataFrame, bucket: str, key: str) -> None:
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
