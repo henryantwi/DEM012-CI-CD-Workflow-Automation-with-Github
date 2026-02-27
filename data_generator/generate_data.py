@@ -1,20 +1,24 @@
 """
 Data Generator — E-commerce Clickstream Platform
 =================================================
-Generates three interrelated CSV datasets and uploads them to MinIO:
-  - users.csv      : synthetic user profiles
-  - products.csv   : synthetic product catalogue (used for AI enrichment later)
-  - events.csv     : clickstream events (view / add_to_cart / purchase)
+Generates interrelated CSV datasets and uploads them to MinIO.
+
+Modes:
+  --mode seed   : Upload users.csv, products.csv, and an initial events batch (default)
+  --mode batch  : Generate and upload a single new timestamped events batch
 
 Usage:
-    uv run python data_generator/generate_data.py
+    uv run python data_generator/generate_data.py --mode seed
+    uv run python data_generator/generate_data.py --mode batch
 
 Environment variables (copy .env.example → .env):
     MINIO_ENDPOINT, MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, MINIO_BUCKET
+    BATCH_EVENT_COUNT  — number of events per batch (default: 500)
 """
 
 from __future__ import annotations
 
+import argparse
 import io
 import logging
 import os
@@ -49,15 +53,37 @@ def _env_int(name: str, default: int) -> int:
 NUM_USERS = _env_int("NUM_USERS", 200)
 NUM_PRODUCTS = _env_int("NUM_PRODUCTS", 50)
 NUM_EVENTS = _env_int("NUM_EVENTS", 2000)
+BATCH_EVENT_COUNT = _env_int("BATCH_EVENT_COUNT", 500)
 
 PRODUCT_ADJECTIVES = [
-    "Wireless", "Portable", "Smart", "Ergonomic", "Ultra", "Pro", "Compact",
-    "Deluxe", "Premium", "Eco-Friendly",
+    "Wireless",
+    "Portable",
+    "Smart",
+    "Ergonomic",
+    "Ultra",
+    "Pro",
+    "Compact",
+    "Deluxe",
+    "Premium",
+    "Eco-Friendly",
 ]
 PRODUCT_NOUNS = [
-    "Headphones", "Keyboard", "Mouse", "Monitor", "Desk Lamp", "Chair",
-    "Backpack", "Notebook", "Water Bottle", "Running Shoes", "T-Shirt",
-    "Blender", "Coffee Maker", "Yoga Mat", "Sunglasses", "Watch",
+    "Headphones",
+    "Keyboard",
+    "Mouse",
+    "Monitor",
+    "Desk Lamp",
+    "Chair",
+    "Backpack",
+    "Notebook",
+    "Water Bottle",
+    "Running Shoes",
+    "T-Shirt",
+    "Blender",
+    "Coffee Maker",
+    "Yoga Mat",
+    "Sunglasses",
+    "Watch",
 ]
 
 fake = Faker()
@@ -66,6 +92,7 @@ Faker.seed(42)
 
 
 # ── Generators ─────────────────────────────────────────────────────────────────
+
 
 def generate_users(n: int = NUM_USERS) -> pl.DataFrame:
     """Generate synthetic user profiles."""
@@ -76,8 +103,7 @@ def generate_users(n: int = NUM_USERS) -> pl.DataFrame:
             "email": [fake.email() for _ in range(n)],
             "country": [fake.country_code() for _ in range(n)],
             "signup_date": [
-                fake.date_between(start_date="-2y", end_date="today").isoformat()
-                for _ in range(n)
+                fake.date_between(start_date="-2y", end_date="today").isoformat() for _ in range(n)
             ],
             "age": [random.randint(18, 65) for _ in range(n)],
         }
@@ -87,12 +113,9 @@ def generate_users(n: int = NUM_USERS) -> pl.DataFrame:
 def generate_products(n: int = NUM_PRODUCTS) -> pl.DataFrame:
     """Generate synthetic product catalogue with raw names for AI categorisation."""
     names = [
-        f"{random.choice(PRODUCT_ADJECTIVES)} {random.choice(PRODUCT_NOUNS)}"
-        for _ in range(n)
+        f"{random.choice(PRODUCT_ADJECTIVES)} {random.choice(PRODUCT_NOUNS)}" for _ in range(n)
     ]
-    descriptions = [
-        f"{fake.sentence(nb_words=8)} {fake.sentence(nb_words=6)}" for _ in range(n)
-    ]
+    descriptions = [f"{fake.sentence(nb_words=8)} {fake.sentence(nb_words=6)}" for _ in range(n)]
     return pl.DataFrame(
         {
             "product_id": [f"p_{i:03d}" for i in range(1, n + 1)],
@@ -121,9 +144,7 @@ def generate_events(
     for _ in range(n):
         user_id = random.choice(user_ids)
         product_id = random.choice(product_ids)
-        event_time = base_time + timedelta(
-            seconds=random.randint(0, 30 * 24 * 3600)
-        )
+        event_time = base_time + timedelta(seconds=random.randint(0, 30 * 24 * 3600))
 
         # Always record a view
         rows.append(
@@ -170,6 +191,7 @@ def generate_events(
 
 # ── MinIO helpers ──────────────────────────────────────────────────────────────
 
+
 def get_minio_client():
     import boto3  # lazy import — not needed in unit tests
 
@@ -201,9 +223,48 @@ def upload_dataframe(client, df: pl.DataFrame, bucket: str, key: str) -> None:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+
+def _batch_key() -> str:
+    """Generate a timestamped key for a batch file: raw/events/batch_YYYYMMDD_HHmmss.csv"""
+    now = datetime.now(tz=timezone.utc)
+    return f"raw/events/batch_{now.strftime('%Y%m%d_%H%M%S')}.csv"
+
+
+def stream_batch(client, bucket: str) -> str:
+    """Generate and upload a single batch of events using existing dimension data from MinIO."""
+    # Read existing user_ids and product_ids from MinIO
+    try:
+        users_obj = client.get_object(Bucket=bucket, Key="raw/users.csv")
+        users_df = pl.read_csv(users_obj["Body"].read())
+        user_ids = users_df["user_id"].to_list()
+    except Exception:
+        logger.warning("[stream_batch] Could not read users from MinIO, generating fresh")
+        users_df = generate_users()
+        user_ids = users_df["user_id"].to_list()
+
+    try:
+        products_obj = client.get_object(Bucket=bucket, Key="raw/products.csv")
+        products_df = pl.read_csv(products_obj["Body"].read())
+        product_ids = products_df["product_id"].to_list()
+    except Exception:
+        logger.warning("[stream_batch] Could not read products from MinIO, generating fresh")
+        products_df = generate_products()
+        product_ids = products_df["product_id"].to_list()
+
+    events_df = generate_events(user_ids=user_ids, product_ids=product_ids, n=BATCH_EVENT_COUNT)
+    key = _batch_key()
+    upload_dataframe(client, events_df, bucket, key)
+    logger.info(
+        "[stream_batch] Uploaded batch: s3://%s/%s (%s events)",
+        bucket, key, len(events_df),
+    )
+    return key
+
+
+def seed_mode() -> None:
+    """Upload dimension tables and an initial events batch."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logger.info("=== Clickstream Data Generator ===")
+    logger.info("=== Clickstream Data Generator (seed mode) ===")
 
     users_df = generate_users()
     products_df = generate_products()
@@ -224,9 +285,39 @@ def main() -> None:
 
     upload_dataframe(client, users_df, MINIO_BUCKET, "raw/users.csv")
     upload_dataframe(client, products_df, MINIO_BUCKET, "raw/products.csv")
-    upload_dataframe(client, events_df, MINIO_BUCKET, "raw/events.csv")
 
-    logger.info("=== Upload complete ===")
+    key = _batch_key()
+    upload_dataframe(client, events_df, MINIO_BUCKET, key)
+
+    logger.info("=== Seed upload complete ===")
+
+
+def batch_mode() -> None:
+    """Generate and upload one new events batch."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logger.info("=== Clickstream Data Generator (batch mode) ===")
+
+    client = get_minio_client()
+    ensure_bucket(client, MINIO_BUCKET)
+    stream_batch(client, MINIO_BUCKET)
+
+    logger.info("=== Batch upload complete ===")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Clickstream data generator")
+    parser.add_argument(
+        "--mode",
+        choices=["seed", "batch"],
+        default="seed",
+        help="seed: initial data upload; batch: generate one new events batch",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "batch":
+        batch_mode()
+    else:
+        seed_mode()
 
 
 if __name__ == "__main__":

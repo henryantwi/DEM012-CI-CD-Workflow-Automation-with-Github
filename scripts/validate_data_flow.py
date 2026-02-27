@@ -41,14 +41,16 @@ PG_CONN = (
 
 METABASE_URL = os.getenv("METABASE_URL", "http://localhost:3000")
 
-EXPECTED_KEYS = ["raw/users.csv", "raw/products.csv", "raw/events.csv"]
+EXPECTED_KEYS = ["raw/users.csv", "raw/products.csv"]
+EXPECTED_PREFIXES = ["raw/events/"]
 logger = logging.getLogger(__name__)
 
 
 # ── Check functions ────────────────────────────────────────────────────────────
 
+
 def check_minio() -> bool:
-    """Verify that all three raw CSV files exist in the MinIO bucket."""
+    """Verify that dimension files and at least one event batch exist in MinIO."""
     import boto3
     from botocore.exceptions import ClientError
 
@@ -60,9 +62,19 @@ def check_minio() -> bool:
             aws_access_key_id=MINIO_ACCESS_KEY,
             aws_secret_access_key=MINIO_SECRET_KEY,
         )
+        # Check dimension files
         for key in EXPECTED_KEYS:
             client.head_object(Bucket=MINIO_BUCKET, Key=key)
             logger.info("  [OK]  s3://%s/%s exists", MINIO_BUCKET, key)
+
+        # Check for event batches under raw/events/ prefix
+        for prefix in EXPECTED_PREFIXES:
+            response = client.list_objects_v2(Bucket=MINIO_BUCKET, Prefix=prefix, MaxKeys=1)
+            if response.get("KeyCount", 0) == 0:
+                logger.error("  [FAIL]  No objects found under s3://%s/%s", MINIO_BUCKET, prefix)
+                return False
+            logger.info("  [OK]  s3://%s/%s has event batches", MINIO_BUCKET, prefix)
+
         return True
     except ClientError as exc:
         logger.error("  [FAIL]  MinIO check failed: %s", exc)
@@ -73,22 +85,37 @@ def check_minio() -> bool:
 
 
 def check_postgres() -> bool:
-    """Verify that fact_funnel_metrics contains rows."""
+    """Verify that fact_funnel_metrics, fact_events, and processed_batches have rows."""
     from sqlalchemy import create_engine, text
 
     logger.info("[2/3] Checking PostgreSQL...")
     try:
         engine = create_engine(PG_CONN)
         with engine.connect() as conn:
-            row_count = conn.execute(
-                text("SELECT COUNT(*) FROM fact_funnel_metrics")
-            ).scalar()
+            row_count = conn.execute(text("SELECT COUNT(*) FROM fact_funnel_metrics")).scalar()
+            events_count = conn.execute(text("SELECT COUNT(*) FROM fact_events")).scalar()
+            batches_count = conn.execute(text("SELECT COUNT(*) FROM processed_batches")).scalar()
+
+        all_ok = True
         if row_count and row_count > 0:
             logger.info("  [OK]  fact_funnel_metrics has %s rows", row_count)
-            return True
         else:
             logger.error("  [FAIL]  fact_funnel_metrics is empty")
-            return False
+            all_ok = False
+
+        if events_count and events_count > 0:
+            logger.info("  [OK]  fact_events has %s rows", events_count)
+        else:
+            logger.error("  [FAIL]  fact_events is empty")
+            all_ok = False
+
+        if batches_count and batches_count > 0:
+            logger.info("  [OK]  processed_batches has %s entries", batches_count)
+        else:
+            logger.error("  [FAIL]  processed_batches is empty")
+            all_ok = False
+
+        return all_ok
     except Exception as exc:  # noqa: BLE001
         logger.error("  [FAIL]  PostgreSQL check failed: %s", exc)
         return False
@@ -126,6 +153,7 @@ def check_metabase(max_retries: int = 5, delay: int = 10) -> bool:
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

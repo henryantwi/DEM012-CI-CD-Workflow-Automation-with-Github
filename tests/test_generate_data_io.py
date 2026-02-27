@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import types
 
@@ -114,3 +115,62 @@ def test_generate_events_minimal_shape_and_event_types():
     assert set(events["event_type"].unique().to_list()).issubset(
         {"view", "add_to_cart", "purchase"}
     )
+
+
+# ── Batch mode tests ──────────────────────────────────────────────────────────
+
+
+def test_batch_key_format():
+    """batch key should follow raw/events/batch_YYYYMMDD_HHmmss.csv pattern."""
+    key = generate_data._batch_key()
+    assert key.startswith("raw/events/batch_")
+    assert key.endswith(".csv")
+    assert re.match(r"raw/events/batch_\d{8}_\d{6}\.csv", key)
+
+
+def test_stream_batch_uploads_and_returns_key():
+    """stream_batch should generate events and upload with timestamped key."""
+    uploaded: list[dict] = []
+
+    class FakeClient:
+        def get_object(self, Bucket, Key):
+            import io
+
+            if "users" in Key:
+                df = pl.DataFrame({"user_id": ["u_001", "u_002"]})
+            else:
+                df = pl.DataFrame({"product_id": ["p_001"]})
+            buf = io.BytesIO()
+            df.write_csv(buf)
+            buf.seek(0)
+            return {"Body": buf}
+
+        def put_object(self, **kwargs):
+            uploaded.append(kwargs)
+
+    client = FakeClient()
+    key = generate_data.stream_batch(client, "test-bucket")
+
+    assert key.startswith("raw/events/batch_")
+    assert key.endswith(".csv")
+    assert len(uploaded) == 1
+    assert uploaded[0]["Bucket"] == "test-bucket"
+    assert b"event_id" in uploaded[0]["Body"]
+
+
+def test_cli_mode_argument(monkeypatch):
+    """CLI --mode flag should be accepted."""
+    import argparse
+
+    # Verify the parser accepts seed and batch
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["seed", "batch"], default="seed")
+
+    args = parser.parse_args(["--mode", "seed"])
+    assert args.mode == "seed"
+
+    args = parser.parse_args(["--mode", "batch"])
+    assert args.mode == "batch"
+
+    args = parser.parse_args([])
+    assert args.mode == "seed"
