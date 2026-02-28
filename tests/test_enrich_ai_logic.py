@@ -52,7 +52,7 @@ def make_config(**overrides) -> EnrichmentConfig:
         "max_attempts": 4,
         "retry_base_seconds": 2.0,
         "retry_max_seconds": 30.0,
-        "max_concurrent_requests": 3,
+        "max_concurrent_requests": 2,
     }
     base.update(overrides)
     return EnrichmentConfig(**base)
@@ -378,3 +378,35 @@ def test_async_enrich_fail_open_on_exhaustion(monkeypatch):
 
     assert all(row["category"] == "Other" for row in out_funnel)
     assert stats["fallbacks"] == 2  # Alpha and Beta both fell back
+
+
+def test_async_rate_gate_throttles_requests():
+    """Rate gate should enforce min_request_interval between API calls."""
+    import time
+
+    call_times: list[float] = []
+
+    class TimingLLM:
+        def invoke(self, prompt: str):
+            call_times.append(time.monotonic())
+            return DummyCategoryResult(category="Electronics")
+
+    products = [
+        {"product_id": f"p{i}", "name": f"Product{i}", "description": f"Desc{i}"}
+        for i in range(5)
+    ]
+    funnel = [{"product_id": f"p{i}"} for i in range(5)]
+    # 10 requests/sec -> 0.1s min interval between calls
+    config = make_config(requests_per_second=10.0, max_concurrent_requests=5)
+
+    asyncio.run(
+        async_enrich_products_with_llm(
+            products=products, funnel_records=funnel, llm=TimingLLM(), config=config
+        )
+    )
+
+    assert len(call_times) == 5
+    # Verify intervals between consecutive calls respect min_request_interval
+    intervals = [call_times[i + 1] - call_times[i] for i in range(len(call_times) - 1)]
+    for gap in intervals:
+        assert gap >= 0.08, f"Gap {gap:.3f}s is below 0.1s threshold (with tolerance)"
