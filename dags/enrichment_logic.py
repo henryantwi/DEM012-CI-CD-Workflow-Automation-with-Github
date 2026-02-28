@@ -51,7 +51,7 @@ def build_enrichment_config_from_env(
         max_attempts=int(source.get("GROQ_MAX_ATTEMPTS", "8")),
         retry_base_seconds=float(source.get("GROQ_RETRY_BASE_SECONDS", "2.0")),
         retry_max_seconds=float(source.get("GROQ_RETRY_MAX_SECONDS", "30.0")),
-        max_concurrent_requests=int(source.get("GROQ_MAX_CONCURRENT", "3")),
+        max_concurrent_requests=int(source.get("GROQ_MAX_CONCURRENT", "2")),
     )
 
 

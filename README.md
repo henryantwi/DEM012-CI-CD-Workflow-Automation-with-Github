@@ -57,7 +57,7 @@ graph LR
 | 1 | `extract` | Scan MinIO `raw/events/` for new batch files not in `processed_batches` table. Download new batches + dimension tables. Skip downstream if no new data. |
 | 2 | `validate_raw` | GE suite per batch: non-null IDs, valid event types, uniqueness checks |
 | 3 | `transform` | Sessionise new events; read ALL batches from MinIO to recompute full funnel metrics |
-| 4 | `enrich_ai` | `asyncio.gather` with `Semaphore(3)` for concurrent LLM calls. Structured output via `init_chat_model("groq:llama-3.3-70b-versatile").with_structured_output(ProductCategory)` |
+| 4 | `enrich_ai` | `asyncio.gather` with `Semaphore(2)` + rate-gate throttling for concurrent LLM calls. Structured output via `init_chat_model("groq:llama-3.3-70b-versatile").with_structured_output(ProductCategory)` |
 | 5 | `validate_enriched` | GE suite: category not-null, conversion rates in [0, 1] |
 | 6 | `load` | Append new events to `fact_events`, full-refresh `dim_products` and `fact_funnel_metrics`, record batch keys in `processed_batches` |
 
@@ -84,6 +84,55 @@ graph LR
 | Dashboard | Metabase |
 | CI/CD | GitHub Actions |
 | Containers | Docker Compose |
+
+---
+
+## Project Structure
+
+```
+.
+├── .github/workflows/       # CI/CD pipeline (GitHub Actions)
+├── dags/
+│   ├── clickstream_pipeline.py   # Main Airflow DAG (6-stage ETL)
+│   └── enrichment_logic.py       # Async LLM enrichment with rate limiting
+├── data_generator/
+│   └── generate_data.py          # Faker-based data generator (seed/batch modes)
+├── docker/
+│   └── airflow/Dockerfile        # Custom Airflow image
+├── docs/screenshots/             # Dashboard and pipeline screenshots
+├── great_expectations/
+│   └── expectations/             # GE validation suites (JSON)
+├── scripts/
+│   └── validate_data_flow.py     # E2E data flow validation script
+├── tests/                        # pytest test suite (83 tests)
+├── docker-compose.yml            # Full platform definition
+├── pyproject.toml                # Python project config
+└── requirements.txt              # Airflow container dependencies
+```
+
+---
+
+## Screenshots
+
+### Pipeline Execution (Airflow)
+
+| DAG Task Graph | Successful DAG Run |
+|:-:|:-:|
+| ![Task Graph](docs/screenshots/airflow-task-graph.png) | ![DAG Run](docs/screenshots/airflow-dag-run-success.png) |
+
+### Data Storage (MinIO)
+
+![MinIO Raw Files](docs/screenshots/minio-raw-files.png)
+
+### Dashboards (Metabase)
+
+| Metabase Home | Funnel Metrics Table |
+|:-:|:-:|
+| ![Home](docs/screenshots/metabase-home.png) | ![Funnel Metrics](docs/screenshots/metabase-fact-funnel-metrics-table.png) |
+
+| Conversion Rates Chart | Products by Category |
+|:-:|:-:|
+| ![Conversion Rates](docs/screenshots/metabase-conversion-rates-chart.png) | ![Products by Category](docs/screenshots/metabase-products-by-category-chart.png) |
 
 ---
 
@@ -194,7 +243,7 @@ uv run ruff format .
 | Variable | Description |
 |----------|-------------|
 | `GROQ_API_KEY` | Required for AI enrichment |
-| `GROQ_MAX_CONCURRENT` | Max concurrent async LLM calls (default: `3`) |
+| `GROQ_MAX_CONCURRENT` | Max concurrent async LLM calls (default: `2`) |
 | `GROQ_REQUESTS_PER_SECOND` | Max request pace (default: `0.8`) |
 | `GROQ_MAX_ATTEMPTS` | Max retry attempts on rate-limit errors (default: `8`) |
 | `BATCH_EVENT_COUNT` | Events per batch in batch mode (default: `500`) |
