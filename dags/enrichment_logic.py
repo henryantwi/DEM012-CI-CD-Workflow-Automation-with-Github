@@ -33,7 +33,7 @@ class EnrichmentConfig:
     max_attempts: int
     retry_base_seconds: float
     retry_max_seconds: float
-    max_concurrent_requests: int = 3
+    max_concurrent_requests: int = 2
 
     @property
     def min_request_interval(self) -> float:
@@ -168,7 +168,25 @@ async def async_enrich_products_with_llm(
             unique_products[name] = (product["product_id"], name, product.get("description", ""))
 
     semaphore = asyncio.Semaphore(config.max_concurrent_requests)
+    # Rate gate: enforce min_request_interval between outgoing API calls
+    rate_lock = asyncio.Lock()
+    last_request_at: list[float] = [0.0]
     fallback_count = 0
+
+    async def _throttled_invoke(
+        llm_ref: Any, prompt: str
+    ) -> CategoryResult:
+        """Acquire rate gate, then delegate to async_invoke_with_retries."""
+        async with rate_lock:
+            loop = asyncio.get_event_loop()
+            now = loop.time()
+            wait = config.min_request_interval - (now - last_request_at[0])
+            if wait > 0:
+                await asyncio.sleep(wait)
+            last_request_at[0] = asyncio.get_event_loop().time()
+        return await async_invoke_with_retries(
+            llm=llm_ref, prompt=prompt, config=config, semaphore=semaphore, log=logger
+        )
 
     async def _invoke_one(name: str, desc: str) -> tuple[str, str]:
         prompt = (
@@ -177,9 +195,7 @@ async def async_enrich_products_with_llm(
             "Classify this product into the most fitting category."
         )
         try:
-            result = await async_invoke_with_retries(
-                llm=llm, prompt=prompt, config=config, semaphore=semaphore, log=logger
-            )
+            result = await _throttled_invoke(llm, prompt)
             logger.info(
                 "[enrich_ai] %r -> %s (confidence: %.2f)",
                 name, result.category, result.confidence,
