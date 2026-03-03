@@ -17,6 +17,9 @@ Built as a hands-on CI/CD automation exercise using GitHub Actions.
 
 ```mermaid
 graph LR
+    %% Data Platform Architecture
+    subgraph Data Platform Architecture
+    direction LR
     GEN["data_generator\nFaker + Polars\n--mode seed | batch"]
 
     subgraph Storage
@@ -48,6 +51,53 @@ graph LR
     MINIO -->|download new batches| E
     L -->|write rows| PG
     PG -->|SQL| MB
+    end
+```
+
+### CI/CD Pipeline Architecture
+
+```mermaid
+graph LR
+    %% Level 1 Jobs
+    UT["Unit Tests"]
+    DBT["Docker Build Test"]
+    CQ["Code Quality"]
+    VAD["Validate Airflow DAGs"]
+    TPS["Test Great Expectations"]
+    TT["Test Transformations & AI"]
+
+    %% Level 2 Jobs
+    DFV["Data Flow Validation"]
+    IT["Integration Checks"]
+
+    %% Level 3 Jobs
+    ATP["All Checks Pass"]
+    CD["CD - Deploy to Test Environment"]
+
+    %% Dependencies -> Level 2
+    UT --> DFV
+    DBT --> DFV
+
+    TPS --> IT
+    TT --> IT
+
+    %% Dependencies -> Level 3 (All Checks Pass)
+    CQ --> ATP
+    VAD --> ATP
+    DFV --> ATP
+    IT --> ATP
+
+    %% Dependencies -> Level 3 (CD)
+    DFV --> CD
+    IT --> CD
+
+    %% Styling to mimic GitHub Actions
+    classDef success fill:#238636,stroke:#fff,stroke-width:2px,color:#fff,rx:20px;
+    classDef pending fill:#21262d,stroke:#8b949e,stroke-width:1px,color:#c9d1d9,rx:20px;
+
+    class UT,DBT,CQ,VAD,TPS,TT pending;
+    class DFV,IT pending;
+    class ATP,CD pending;
 ```
 
 ### Pipeline Tasks
