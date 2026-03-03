@@ -74,14 +74,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - name: Install Python dependencies
-        run: uv sync --locked
-      - name: Parse DAGs for import errors
-        run: uv run python -c "from airflow.models import DagBag; d = DagBag(dag_folder='dags/', include_examples=False); assert not d.import_errors, 'DAG import errors found'"
+      - name: Build custom Airflow Docker image
+        run: docker build -f docker/airflow/Dockerfile -t dem012-airflow:latest .
+      - name: Parse DAGs for import errors in Docker
+        run: docker run --rm -v ${{ github.workspace }}/dags:/opt/airflow/dags dem012-airflow:latest python -c "from airflow.models import DagBag; d = DagBag(dag_folder='/opt/airflow/dags', include_examples=False); assert not d.import_errors, 'DAG import errors found'"
 
   test-great-expectations:
     name: Test Great Expectations
