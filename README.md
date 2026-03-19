@@ -18,7 +18,7 @@ Built as a hands-on CI/CD automation exercise using GitHub Actions.
 The platform is split into two cooperating layers: a **CI/CD layer** (GitHub Actions) that tests, validates, and deploys, and a **Runtime Platform** (Docker Compose) that ingests, processes, and serves clickstream data.
 
 ### Full Platform View
-![Architecture Diagram](docs/screenshots/architecture.excalidraw.png)
+![Architecture Diagram](docs/screenshots/architecture.svg)
 
 ### Component Overview
 
