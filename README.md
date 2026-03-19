@@ -34,6 +34,8 @@ The platform is split into two cooperating layers: a **CI/CD layer** (GitHub Act
 | **Dashboard** | Metabase | SQL-driven charts and tables served at `localhost:3000` |
 | **CI/CD** | GitHub Actions | Parallel quality checks → Docker platform startup → E2E validation on every push/PR |
 
+![Data Flow](docs/screenshots/data-flow.svg)
+
 ### Pipeline Tasks
 
 | # | Task | Tools | What it does |
