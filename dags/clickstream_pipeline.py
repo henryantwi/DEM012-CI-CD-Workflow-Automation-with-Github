@@ -39,7 +39,7 @@ DEFAULT_ARGS = {
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
     "on_failure_callback": lambda ctx: logger.error(
-        "🔴 TASK FAILED: dag=%s task=%s run=%s try=%s exception=%s",
+        "TASK FAILED: dag=%s task=%s run=%s try=%s exception=%s",
         ctx.get("dag").dag_id if ctx.get("dag") else "unknown",
         ctx.get("task_instance").task_id if ctx.get("task_instance") else "unknown",
         ctx.get("dag_run").run_id if ctx.get("dag_run") else "unknown",

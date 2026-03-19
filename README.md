@@ -15,57 +15,46 @@ Built as a hands-on CI/CD automation exercise using GitHub Actions.
 
 ## Architecture
 
-```mermaid
-graph LR
-    GEN["data_generator\nFaker + Polars\n--mode seed | batch"]
+The platform is split into two cooperating layers: a **CI/CD layer** (GitHub Actions) that tests, validates, and deploys, and a **Runtime Platform** (Docker Compose) that ingests, processes, and serves clickstream data.
 
-    subgraph Storage
-        MINIO["MinIO\nS3-compatible\nobject store\nraw/events/batch_*.csv"]
-    end
+### Full Platform View
+![Architecture Diagram](docs/screenshots/architecture.excalidraw.png)
 
-    subgraph Orchestration
-        AIRFLOW["Airflow 2.9\nLocalExecutor"]
-        subgraph DAG: clickstream_pipeline
-            E["1 · extract\nscan for new batches"]
-            VR["2 · validate_raw\nGreat Expectations"]
-            T["3 · transform\nPolars sessionisation\n+ full funnel recalc"]
-            AI["4 · enrich_ai\nasync LLM calls\ngroq:llama-3.3-70b"]
-            VE["5 · validate_enriched\nGreat Expectations"]
-            L["6 · load\nappend events +\nfull-refresh metrics"]
-        end
-        E --> VR --> T --> AI --> VE --> L
-    end
+### Component Overview
 
-    subgraph Database
-        PG["PostgreSQL 15\ndim_products\nfact_funnel_metrics\nfact_events\nprocessed_batches"]
-    end
-
-    subgraph Dashboard
-        MB["Metabase\n:3000"]
-    end
-
-    GEN -->|upload CSV batches| MINIO
-    MINIO -->|download new batches| E
-    L -->|write rows| PG
-    PG -->|SQL| MB
-```
+| Layer | Component | Role |
+|-------|-----------|------|
+| **Ingestion** | `data_generator` | Produces synthetic e-commerce events using Faker + Polars in `seed` or `batch` mode |
+| **Object Storage** | MinIO | S3-compatible store for raw CSV batches and dimension files |
+| **Orchestration** | Apache Airflow 2.9 | Schedules and executes the 6-stage `clickstream_pipeline` DAG daily |
+| **Validation** | Great Expectations | Runs schema + quality suites on raw and enriched data at pipeline checkpoints |
+| **Transformation** | Polars | Sessionises events; recomputes full funnel metrics from all historical batches |
+| **AI Enrichment** | LangChain + Groq | Async concurrent LLM calls with semaphore rate-limiting for product categorisation |
+| **Data Warehouse** | PostgreSQL 15 | Houses dimension (`dim_products`) and fact (`fact_events`, `fact_funnel_metrics`) tables |
+| **Dashboard** | Metabase | SQL-driven charts and tables served at `localhost:3000` |
+| **CI/CD** | GitHub Actions | Parallel quality checks → Docker platform startup → E2E validation on every push/PR |
 
 ### Pipeline Tasks
 
-| # | Task | What it does |
-|---|------|-------------|
-| 1 | `extract` | Scan MinIO `raw/events/` for new batch files not in `processed_batches` table. Download new batches + dimension tables. Skip downstream if no new data. |
-| 2 | `validate_raw` | GE suite per batch: non-null IDs, valid event types, uniqueness checks |
-| 3 | `transform` | Sessionise new events; read ALL batches from MinIO to recompute full funnel metrics |
-| 4 | `enrich_ai` | `asyncio.gather` with `Semaphore(2)` + rate-gate throttling for concurrent LLM calls. Structured output via `init_chat_model("groq:llama-3.3-70b-versatile").with_structured_output(ProductCategory)` |
-| 5 | `validate_enriched` | GE suite: category not-null, conversion rates in [0, 1] |
-| 6 | `load` | Append new events to `fact_events`, full-refresh `dim_products` and `fact_funnel_metrics`, record batch keys in `processed_batches` |
+| # | Task | Tools | What it does |
+|---|------|-------|-------------|
+| 1 | `extract` | MinIO, Polars | Scan `raw/events/` for batch files not yet in `processed_batches`. Download new batches + dimension tables. Short-circuits downstream if no new data. |
+| 2 | `validate_raw` | Great Expectations | Per-batch GE suite: non-null IDs, valid event types, uniqueness constraints. |
+| 3 | `transform` | Polars | Sessionise new events; read **all** batches from MinIO to recompute full funnel metrics from scratch. |
+| 4 | `enrich_ai` | LangChain, Groq | `asyncio.gather` with `Semaphore(2)` + rate-gate throttling. Structured output via `init_chat_model("groq:llama-3.3-70b-versatile").with_structured_output(ProductCategory)`. |
+| 5 | `validate_enriched` | Great Expectations | GE suite: `category` not-null, conversion rates in `[0, 1]`. |
+| 6 | `load` | SQLAlchemy, PostgreSQL | Append new events → `fact_events`; full-refresh `dim_products` and `fact_funnel_metrics`; record batch keys in `processed_batches`. |
 
 ### Data Flow
 
-- **Dimension tables** (`users.csv`, `products.csv`): uploaded once via `seed` mode, full-refresh in PostgreSQL
-- **Events**: partitioned into timestamped batches (`raw/events/batch_YYYYMMDD_HHmmss.csv`), appended to `fact_events`
-- **Funnel metrics**: recalculated from ALL events in MinIO on each run, full-refresh in `fact_funnel_metrics`
+> **Incremental by design** — the DAG processes only *new* batches each run, while funnel metrics are always recomputed from the full historical dataset.
+
+| Data Type | Storage Path | Update Strategy |
+|-----------|-------------|-----------------|
+| Dimension tables (`users.csv`, `products.csv`) | `raw/` — uploaded once via `seed` mode | Full-refresh in PostgreSQL |
+| Event batches | `raw/events/batch_YYYYMMDD_HHmmss.csv` | Appended to `fact_events`; only unprocessed batches fetched |
+| Funnel metrics | Derived from all `fact_events` | Full-refresh `fact_funnel_metrics` on every run |
+
 
 ---
 
